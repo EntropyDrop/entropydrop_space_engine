@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package entropydrop.space.backpack.v6;
+
+import "inventory.proto";
+
+// Browser-local UI state. Backpack messages are never uploaded to the market;
+// only InventoryResource crosses the frontend/backend boundary.
+enum InventoryCategory {
+  INVENTORY_CATEGORY_BLOCK_SET = 0;
+  INVENTORY_CATEGORY_ENTITY = 1;
+  INVENTORY_CATEGORY_COLOR_SET = 2;
+}
+
+// The repeated BackpackSlot position is the local UI slot position. Empty
+// wrappers preserve internal gaps, and trailing empty slots are omitted.
+message BackpackSlot {
+  entropydrop.space.inventory.v5.InventoryResource resource = 1;
+}
+
+message InventoryGroup {
+  uint32 selected = 1;
+  repeated BackpackSlot slots = 2;
+}
+
+message Backpack {
+  uint32 schema_version = 1;
+  InventoryCategory active_category = 2;
+  InventoryGroup block_sets = 3;
+  InventoryGroup entities = 4;
+  InventoryGroup color_sets = 5;
+}

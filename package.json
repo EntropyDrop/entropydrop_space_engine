@@ -1,0 +1,38 @@
+{
+  "name": "@entropydrop/space-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24", "npm": ">=10" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json",
+    "./testing/setup": "./test/setup.ts",
+    "./proto/*": "./proto/*",
+    "./*": "./src/*"
+  },
+  "scripts": {
+    "generate:protobuf": "node tools/generate-protobuf.mjs",
+    "check:protobuf": "node tools/generate-protobuf.mjs --check",
+    "docs:generate": "node tools/generate-api-docs.ts",
+    "docs:check": "node tools/generate-api-docs.ts --check",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test/setup.ts --test --test-concurrency=1 \"test/*.test.ts\"",
+    "check": "npm run check:protobuf && npm run docs:check && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.14.1",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "acorn": "^8.18.0",
+    "quickjs-emscripten-core": "0.32.0",
+    "simplex-noise": "^4.0.3"
+  },
+  "peerDependencies": { "three": "^0.183.2" },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/three": "^0.183.1",
+    "three": "^0.183.2",
+    "ts-proto": "^2.12.1",
+    "typescript": "~5.9.3"
+  }
+}
