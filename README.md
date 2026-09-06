@@ -1,9 +1,13 @@
 # Space engine
 
+[spaceAPI](docs/spaceAPI.md) · [entityAPI](docs/generated/api-v2.md)
+
+entityAPI is the runtime interface for entity code (`self` / `ctx`); spaceAPI is the HTTP interface for Agent requests.
+
 `@entropydrop/space-engine` contains the TypeScript engine shared by the Space browser
 application and the backend hosting worker. It owns voxel/chunk data, terrain generation,
 meshing, torus math, entities, physics, simulation timing, the QuickJS script sandbox,
-script API contracts, inventory Protobuf schemas/codecs, and their tests.
+entityAPI contracts, inventory Protobuf schemas/codecs, and their tests.
 
 The engine does not import either application repository. `SpaceStorage` and
 `SurfaceZoneSnapshot` define the data interfaces supplied by the browser or backend.

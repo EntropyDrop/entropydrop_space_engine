@@ -7,14 +7,15 @@ import {
 
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
 const generatedDir = fileURLToPath(new URL('../docs/generated/', import.meta.url));
+const repositoryLinks = { spaceApiUrl: '../spaceAPI.md', entityApiUrl: 'api-v2.md' };
 const outputs = new Map([
   [
     `${generatedDir}api-v2.md`,
-    renderApiReferenceMarkdown()
+    renderApiReferenceMarkdown(undefined, repositoryLinks)
   ],
   [
     `${generatedDir}agent-api-v2.md`,
-    `# Space Script API V2 — Agent Reference\n\n<!-- GENERATED from src/contraption/ScriptApiContract.ts. Do not edit by hand. -->\n\n${renderAgentApiReference()}\n`
+    `# entityAPI V2 — Code generation reference\n\n<!-- GENERATED from src/contraption/ScriptApiContract.ts. Do not edit by hand. -->\n\n${renderAgentApiReference(undefined, repositoryLinks)}\n`
   ]
 ]);
 

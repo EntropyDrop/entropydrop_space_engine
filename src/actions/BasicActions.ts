@@ -620,14 +620,6 @@ function executeEntityAction(context: any, command: any) {
         physicsEnabled: contraption.isPhysicsSimulationEnabled?.() !== false
       });
     }
-    case 'pause-scripts': {
-      if (contraption.scriptStatus !== 'running') {
-        return actionResult(command.action, 0, 'already_paused', { status: contraption.scriptStatus || 'stopped' });
-      }
-      contraption.disableAllNodeScripts?.();
-      invalidateInternalEntitySelections(context, contraption);
-      return actionResult(command.action, 1, 'paused', { status: contraption.scriptStatus || 'running' });
-    }
     case 'stop-scripts': {
       if (contraption.scriptStatus === 'stopped' && contraption.isPhysicsSimulationEnabled?.() === false) {
         return actionResult(command.action, 0, 'already_stopped', { status: 'stopped', physicsEnabled: false });

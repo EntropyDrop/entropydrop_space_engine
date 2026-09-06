@@ -8,7 +8,7 @@ import {
   validateScriptApiContract
 } from '../src/contraption/ScriptApiContract.ts';
 
-test('Script API V2 contract is valid and renders every supported view', () => {
+test('entityAPI V2 contract is valid and renders every supported view', () => {
   assert.deepEqual(validateScriptApiContract(), []);
 
   const html = renderApiReferenceHtml();
@@ -36,4 +36,16 @@ test('canonical runtime surfaces have unique stable keys', () => {
     assert.equal(new Set(keys).size, keys.length, `${surface} contains duplicate keys`);
     assert.ok(keys.length > 0, `${surface} cannot be empty`);
   }
+});
+
+test('entityAPI documentation identifies both APIs and uses the selected backend links', () => {
+  const links = { spaceApiUrl: 'https://space.example.test/space/agent/spaceAPI.md', entityApiUrl: 'https://space.example.test/space/agent/entityAPI.md' };
+  for (const rendered of [renderApiReferenceHtml(undefined, links), renderApiReferenceMarkdown(undefined, links), renderAgentApiReference(undefined, links)]) {
+    assert.ok(rendered.includes(links.spaceApiUrl));
+    assert.ok(rendered.includes(links.entityApiUrl));
+    assert.ok(rendered.includes('entity runtime executes it'));
+    assert.ok(!rendered.includes('Space Script API V2'));
+  }
+  const escaped = renderApiReferenceHtml(undefined, { ...links, spaceApiUrl: 'https://space.example.test/?a="b"&c=d' });
+  assert.ok(escaped.includes('?a=&quot;b&quot;&amp;c=d'));
 });

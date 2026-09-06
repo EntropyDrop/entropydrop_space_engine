@@ -1,16 +1,20 @@
-# Space Script API V2 — Agent Reference
+# entityAPI V2 — Code generation reference
 
 <!-- GENERATED from src/contraption/ScriptApiContract.ts. Do not edit by hand. -->
 
-## Canonical Space Script API V2 contract
+## Canonical entityAPI V2 contract
 
-Use only the API below. API facts in this section are generated from the same contract as the in-game reference.
+[spaceAPI](<../spaceAPI.md>) · [entityAPI](<api-v2.md>)
+
+entityAPI is called by entity component code through `self` and `ctx` inside the runtime. spaceAPI is the authenticated HTTP API used by agents and clients to query or change Space. Agents may generate entityAPI code; the entity runtime executes it.
+
+Use the entityAPI below when generating entity code. API facts come from the same contract as the in-game reference.
 ### Defaults and coordinate conventions
 
 - Coordinates are right-handed and Y-up: +X right, +Y up, -Z forward. Euler angles use YXZ order; quaternions are `[x,y,z,w]`.
 - A component pivot starts at its own block AABB centroid and never moves automatically after block edits. Use `getBounds()` then `setPivot(bounds.center)` to recenter a kinematic body without moving its blocks.
 - Component IDs are unique across the entire entity; no string is reserved. The root is identified structurally by `parentId:null`, and a child's local position is its pivot offset in the parent pivot frame.
-- All scripts start enabled. Pause preserves active physics, state, and runtime BodyConfig values; Stop disables entity physics, clears state/time/tick/motion, resets child transforms, and restores persisted BodyConfig defaults. Play re-enables physics from the stopped construction pose.
+- Entities have only running and stopped states. Start enables entity physics and all component scripts. Stop disables physics and scripts, clears state/time/tick/motion, resets child transforms, and restores persisted BodyConfig defaults. Individual component code switches do not create a third entity state.
 - BodyConfig defaults are type, mass, restitution, friction, gravity, and collision. Script setters are runtime-only; serialization always writes defaults.
 - Collision defaults to enabled. A disabled component remains rendered/editable but has no terrain, player, entity, or raycast shapes.
 
@@ -24,7 +28,7 @@ Use only the API below. API facts in this section are generated from the same co
 
 - Every component script receives `(self, ctx)` once per fixed 20 Hz entity tick. `self` is the target component; root body fields in `ctx` always describe the root entity.
 - The root script runs before child scripts. All components share one frozen frame-start `ctx` snapshot; admitted commands commit after the synchronous QuickJS tick.
-- Each component owns `self.state`. Completed state survives chunk streaming; Pause freezes it and Stop clears it.
+- Each component owns `self.state`. Completed state survives chunk streaming and disabling component code; Stop clears it.
 - Queued mutation success means command-buffer admission (`reason:'queued'`), not final commit. Successful admission includes `commandId`; the main thread revalidates bounds, occupancy, and permissions and publishes the final result through `ctx.commands` on the next submitted frame.
 - Limits: 4 MiB runtime memory, 512 KiB stack, 64 components per entity, 256 commands, 256 world voxel reads, and 64 raycasts per tick, 5 ms per component invocation, 25 ms aggregate entity time, and 64 VM interrupt checkpoints.
 - A component exception disables that component. Aggregate time/checkpoint failure disables every component script and discards commands from the interrupted tick.
@@ -32,12 +36,12 @@ Use only the API below. API facts in this section are generated from the same co
 
 ### ctx — read-only frame snapshot
 
-- `ctx.apiVersion` — Current script API version: `2`.
+- `ctx.apiVersion` — Current entityAPI version: `2`.
 - `ctx.entityId` — Stable random ID of the current entity.
 - `ctx.root` — Root component and entry point for recursive tree traversal.
-- `ctx.time` — Seconds with at least one component script enabled; Pause freezes it and Stop resets it.
+- `ctx.time` — Seconds with at least one component script enabled; disabled code does not advance it and Stop resets it.
 - `ctx.deltaTime` — Fixed entity simulation step: always `0.05` seconds (20 Hz); scripts cannot change it.
-- `ctx.tick` — Executed script-frame count; Pause freezes it and Stop resets it.
+- `ctx.tick` — Executed script-frame count; disabled code does not advance it and Stop resets it.
 - `ctx.position` — Root entity world position. It is continuous and does not wrap at the torus seam.
 - `ctx.velocity` — Root world-space velocity in m/s.
 - `ctx.rotation` — Root Euler angles in radians using YXZ order.
@@ -123,7 +127,7 @@ Only kinematic bodies accept direct pose commands; dynamic bodies are solver-dri
 - `self.constraints.remove(id)` — Queue removal of one constraint; returns boolean.
 - `self.stop()` — Root-only global Stop: disable entity physics and scripts, clear state/time/tick/motion, reset child poses, and restore persisted BodyConfig defaults. Collision and selection shapes remain active. Child code must call `ctx.root.stop()`.
 
-> `self.body` setters alter runtime values only. Pause preserves them and keeps physics active; global Stop disables dynamics while retaining static collision/query shapes and restores persisted defaults.
+> `self.body` setters alter runtime values only. They persist until global Stop, which disables dynamics while retaining static collision/query shapes and restores persisted defaults.
 
 > `self.body.apply*` targets the current component body and bypasses the legacy `ctx.limits`/HUD budget, but rejects non-finite values and components above `1e12`.
 

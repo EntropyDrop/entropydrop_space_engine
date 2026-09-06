@@ -282,7 +282,7 @@ test('self.stop is root-only; child code can stop through ctx.root', () => {
   assert.deepEqual(contraption.getComponentState('arm'), {}, 'root Stop clears state and ends child invocation');
 });
 
-test('script time counts enabled execution, freezes on Pause, and resets on Stop', () => {
+test('script time counts enabled execution, does not advance with all component code disabled, and resets on Stop', () => {
   const { contraption } = makeContraption();
   contraption.setNodeScript('root', 'self.state.time = ctx.time; self.state.tick = ctx.tick;');
   contraption.update(0.25, null, {});

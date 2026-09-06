@@ -1,8 +1,8 @@
 /**
- * Canonical Space Script API V2 contract.
+ * Canonical entityAPI V2 contract.
  *
  * API facts belong here exactly once. The in-game HTML reference, generated
- * Markdown, Agent API reference, and runtime-surface tests all consume this
+ * Markdown, entityAPI code-generation reference, and runtime-surface tests all consume this
  * structure. Agent behavior/output policy deliberately remains in AgentChat.
  */
 
@@ -36,12 +36,12 @@ export interface ScriptApiContract {
 }
 
 const ctxEntries: ApiEntry[] = [
-  { signature: 'ctx.apiVersion', type: 'number', description: 'Current script API version: `2`.' },
+  { signature: 'ctx.apiVersion', type: 'number', description: 'Current entityAPI version: `2`.' },
   { signature: 'ctx.entityId', type: 'string', description: 'Stable random ID of the current entity.' },
   { signature: 'ctx.root', type: 'ComponentAPI', description: 'Root component and entry point for recursive tree traversal.' },
-  { signature: 'ctx.time', type: 'number', description: 'Seconds with at least one component script enabled; Pause freezes it and Stop resets it.' },
+  { signature: 'ctx.time', type: 'number', description: 'Seconds with at least one component script enabled; disabled code does not advance it and Stop resets it.' },
   { signature: 'ctx.deltaTime', type: 'number', description: 'Fixed entity simulation step: always `0.05` seconds (20 Hz); scripts cannot change it.' },
-  { signature: 'ctx.tick', type: 'number', description: 'Executed script-frame count; Pause freezes it and Stop resets it.' },
+  { signature: 'ctx.tick', type: 'number', description: 'Executed script-frame count; disabled code does not advance it and Stop resets it.' },
   { signature: 'ctx.position', type: '[x,y,z]', description: 'Root entity world position. It is continuous and does not wrap at the torus seam.' },
   { signature: 'ctx.velocity', type: '[x,y,z]', description: 'Root world-space velocity in m/s.' },
   { signature: 'ctx.rotation', type: '[x,y,z]', description: 'Root Euler angles in radians using YXZ order.' },
@@ -152,7 +152,7 @@ const selectionEntries: ApiEntry[] = [
 
 export const SPACE_SCRIPT_API_V2: ScriptApiContract = {
   version: 2,
-  title: 'Space Script API V2',
+  title: 'entityAPI V2',
   summary: 'Canonical contract for component scripts running with `(self, ctx)` in the Space voxel-physics world.',
   sections: [
     {
@@ -162,7 +162,7 @@ export const SPACE_SCRIPT_API_V2: ScriptApiContract = {
         'Coordinates are right-handed and Y-up: +X right, +Y up, -Z forward. Euler angles use YXZ order; quaternions are `[x,y,z,w]`.',
         "A component pivot starts at its own block AABB centroid and never moves automatically after block edits. Use `getBounds()` then `setPivot(bounds.center)` to recenter a kinematic body without moving its blocks.",
         "Component IDs are unique across the entire entity; no string is reserved. The root is identified structurally by `parentId:null`, and a child's local position is its pivot offset in the parent pivot frame.",
-        'All scripts start enabled. Pause preserves active physics, state, and runtime BodyConfig values; Stop disables entity physics, clears state/time/tick/motion, resets child transforms, and restores persisted BodyConfig defaults. Play re-enables physics from the stopped construction pose.',
+        'Entities have only running and stopped states. Start enables entity physics and all component scripts. Stop disables physics and scripts, clears state/time/tick/motion, resets child transforms, and restores persisted BodyConfig defaults. Individual component code switches do not create a third entity state.',
         'BodyConfig defaults are type, mass, restitution, friction, gravity, and collision. Script setters are runtime-only; serialization always writes defaults.',
         'Collision defaults to enabled. A disabled component remains rendered/editable but has no terrain, player, entity, or raycast shapes.'
       ]
@@ -190,7 +190,7 @@ const dz = wrappedDelta(ctx.position[2], target[2], 2048);`
       facts: [
         'Every component script receives `(self, ctx)` once per fixed 20 Hz entity tick. `self` is the target component; root body fields in `ctx` always describe the root entity.',
         'The root script runs before child scripts. All components share one frozen frame-start `ctx` snapshot; admitted commands commit after the synchronous QuickJS tick.',
-        'Each component owns `self.state`. Completed state survives chunk streaming; Pause freezes it and Stop clears it.',
+        'Each component owns `self.state`. Completed state survives chunk streaming and disabling component code; Stop clears it.',
         "Queued mutation success means command-buffer admission (`reason:'queued'`), not final commit. Successful admission includes `commandId`; the main thread revalidates bounds, occupancy, and permissions and publishes the final result through `ctx.commands` on the next submitted frame.",
         'Limits: 4 MiB runtime memory, 512 KiB stack, 64 components per entity, 256 commands, 256 world voxel reads, and 64 raycasts per tick, 5 ms per component invocation, 25 ms aggregate entity time, and 64 VM interrupt checkpoints.',
         'A component exception disables that component. Aggregate time/checkpoint failure disables every component script and discards commands from the interrupted tick.',
@@ -219,7 +219,7 @@ const dz = wrappedDelta(ctx.position[2], target[2], 2048);`
           title: 'Rigid body, constraints, and Stop',
           entries: bodyEntries,
           notes: [
-            '`self.body` setters alter runtime values only. Pause preserves them and keeps physics active; global Stop disables dynamics while retaining static collision/query shapes and restores persisted defaults.',
+            '`self.body` setters alter runtime values only. They persist until global Stop, which disables dynamics while retaining static collision/query shapes and restores persisted defaults.',
             '`self.body.apply*` targets the current component body and bypasses the legacy `ctx.limits`/HUD budget, but rejects non-finite values and components above `1e12`.',
             'Constraint creation is queued. Supply an explicit ID when later script logic requires a stable name; hinge limits are radians.'
           ]
@@ -327,8 +327,25 @@ function renderHtmlSection(section: ApiSection, depth = 2): string {
   return `<div class="api-section"><div class="${headingClass}">${inlineHtml(section.title)}</div>${intro}${facts}${entries}${notes}${examples}${subsections}</div>`;
 }
 
-export function renderApiReferenceHtml(contract: ScriptApiContract = SPACE_SCRIPT_API_V2): string {
-  return contract.sections.map(section => renderHtmlSection(section)).join('\n');
+export interface ApiDocumentationLinks {
+  spaceApiUrl: string;
+  entityApiUrl: string;
+}
+
+const PUBLIC_API_DOCS: ApiDocumentationLinks = {
+  spaceApiUrl: '/space/agent/spaceAPI.md',
+  entityApiUrl: '/space/agent/entityAPI.md'
+};
+
+const API_BOUNDARY = 'entityAPI is called by entity component code through `self` and `ctx` inside the runtime. spaceAPI is the authenticated HTTP API used by agents and clients to query or change Space. Agents may generate entityAPI code; the entity runtime executes it.';
+
+function markdownApiNavigation(links: ApiDocumentationLinks): string {
+  return `[spaceAPI](<${links.spaceApiUrl}>) · [entityAPI](<${links.entityApiUrl}>)`;
+}
+
+export function renderApiReferenceHtml(contract: ScriptApiContract = SPACE_SCRIPT_API_V2, links: ApiDocumentationLinks = PUBLIC_API_DOCS): string {
+  const navigation = `<nav class="api-docs-links" aria-label="API documentation"><a href="${escapeHtml(links.spaceApiUrl)}" target="_blank" rel="noopener noreferrer">spaceAPI · Agent HTTP requests</a><a href="${escapeHtml(links.entityApiUrl)}" target="_blank" rel="noopener noreferrer">entityAPI · Entity code</a></nav><p class="api-sub">${inlineHtml(API_BOUNDARY)}</p>`;
+  return navigation + contract.sections.map(section => renderHtmlSection(section)).join('\n');
 }
 
 function markdownSection(section: ApiSection, depth = 2, agentOnly = false): string {
@@ -363,11 +380,15 @@ function markdownSection(section: ApiSection, depth = 2, agentOnly = false): str
   return lines.join('\n').trimEnd();
 }
 
-export function renderApiReferenceMarkdown(contract: ScriptApiContract = SPACE_SCRIPT_API_V2): string {
+export function renderApiReferenceMarkdown(contract: ScriptApiContract = SPACE_SCRIPT_API_V2, links: ApiDocumentationLinks = PUBLIC_API_DOCS): string {
   const header = [
     `# ${contract.title}`,
     '',
     '<!-- GENERATED from src/contraption/ScriptApiContract.ts. Do not edit by hand. -->',
+    '',
+    markdownApiNavigation(links),
+    '',
+    API_BOUNDARY,
     '',
     contract.summary,
     ''
@@ -375,11 +396,15 @@ export function renderApiReferenceMarkdown(contract: ScriptApiContract = SPACE_S
   return `${header.join('\n')}${contract.sections.map(section => markdownSection(section)).join('\n\n')}\n`;
 }
 
-export function renderAgentApiReference(contract: ScriptApiContract = SPACE_SCRIPT_API_V2): string {
+export function renderAgentApiReference(contract: ScriptApiContract = SPACE_SCRIPT_API_V2, links: ApiDocumentationLinks = PUBLIC_API_DOCS): string {
   const header = [
     `## Canonical ${contract.title} contract`,
     '',
-    'Use only the API below. API facts in this section are generated from the same contract as the in-game reference.',
+    markdownApiNavigation(links),
+    '',
+    API_BOUNDARY,
+    '',
+    'Use the entityAPI below when generating entity code. API facts come from the same contract as the in-game reference.',
     ''
   ];
   return `${header.join('\n')}${contract.sections.map(section => markdownSection(section, 3, true)).filter(Boolean).join('\n\n')}`;
@@ -414,4 +439,4 @@ export function validateScriptApiContract(contract: ScriptApiContract = SPACE_SC
 }
 
 const contractErrors = validateScriptApiContract(SPACE_SCRIPT_API_V2);
-if (contractErrors.length) throw new Error(`Invalid Space Script API contract:\n${contractErrors.join('\n')}`);
+if (contractErrors.length) throw new Error(`Invalid entityAPI contract:\n${contractErrors.join('\n')}`);

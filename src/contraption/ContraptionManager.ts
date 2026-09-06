@@ -770,6 +770,8 @@ export class ContraptionManager {
     contraption.pistonDirection = Number(record.pistonDirection) || 1;
     if (Array.isArray(record.pistonBasePos)) contraption.pistonBasePos.fromArray(record.pistonBasePos);
     contraption.updateTransform();
+    // spaceAPI Stop/configuration saves placement while discarding runtime state.
+    if (record.resetRuntime === true) contraption.stopAllNodeScripts();
   }
 
   restoreDormantContraption(record) {

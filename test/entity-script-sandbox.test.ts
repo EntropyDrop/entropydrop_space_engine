@@ -330,7 +330,7 @@ self.state.collision = self.body.setCollisionEnabled(false);
   assert.equal(serializedWhileRunning.collisionEnabled, true);
 
   contraption.disableAllNodeScripts();
-  assert.equal(contraption.getNodeBodyMass('root'), 65, 'Pause preserves runtime BodyConfig values');
+  assert.equal(contraption.getNodeBodyMass('root'), 65, 'Disabled component code preserves runtime BodyConfig values');
   assert.equal(contraption.getNodeCollisionEnabled('root'), false);
 
   contraption.stopAllNodeScripts();

@@ -1504,7 +1504,7 @@ export class Contraption {
       this.setPhysicsSimulationEnabled(true);
     }
 
-    this.log(`[SW] [${id}] Code switch: ${state ? 'ON (RUN)' : 'OFF (PAUSE)'}`);
+    this.log(`[SW] [${id}] Code switch: ${state ? 'ON (RUN)' : 'OFF'}`);
     return state;
   }
 
@@ -1537,7 +1537,7 @@ export class Contraption {
       body.appliedForces.set(0, 0, 0);
       body.appliedTorques.set(0, 0, 0);
     }
-    this.log(`[OFF] All component scripts paused and disabled`);
+    this.log(`[OFF] All component scripts disabled`);
   }
 
   /**
@@ -1677,7 +1677,7 @@ export class Contraption {
 
   /**
    * Structural edits use authored node-local voxel coordinates. Only Stop
-   * restores every child to that construction pose; Pause intentionally keeps
+   * restores every child to that construction pose; Individual code switches keep
    * the current runtime pose and therefore is not safe for component/block
    * selection.
    */
