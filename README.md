@@ -74,3 +74,30 @@ engine checks and browser integration tests.
 Rebuild both consumers after shared physics/script/codec changes. The optional hosting
 Docker image builds from the backend and this repository only. Hosting remains disabled
 in both applications until explicitly enabled; extracting this package does not enable it.
+
+## Entity collision performance
+
+Physics uses exact unions of merged, component-local voxel boxes. Standard and
+micro voxels can merge where their complete faces match; gaps and component
+boundaries remain intact. Editing, raycasts and player collision retain original
+voxel cells. Terrain keeps its surface probes and uses merged boxes with bounded
+extent for exact contacts, preserving support and fast-motion checks.
+
+The entity solver rejects disjoint swept entity bounds before checking component
+boxes, then uses a per-pose box tree for complex shapes. Bounds are checked again
+at every substep/iteration because earlier impulses can move another entity.
+Stopped/stopped pairs are omitted; stopped entities still collide with active ones.
+
+Entities settle to sleep after one second of low motion when supported (or without
+gravity). Their authored run state stays unchanged. Impacts, forces, impulses,
+pose/shape/body-setting changes, Stop/Play, terrain revisions, chunk-window changes,
+and support movement/removal wake them. Running scripts remain awake to preserve
+contact observation and script timing. Hosts must expose a numeric `terrainVersion`
+and increment it on terrain collision changes to enable sleep; hosts without this
+notification continue simulating normally. Manager updates maintain the active
+support set so unloading a supporting entity wakes its load.
+
+Run a reproducible CPU benchmark with `node tools/benchmark-physics.ts`. It reports
+median/p95 time per 50 ms simulation update for 100 entities of 100 voxels each,
+with awake, stopped and sleeping cases. It excludes GPU drawing, terrain occupancy,
+scripts and network work; it does not estimate browser FPS.

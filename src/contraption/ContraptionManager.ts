@@ -2170,6 +2170,7 @@ export class ContraptionManager {
 
   update(dt, inputState) {
     this.syncContraptionsToLoadedChunks();
+    this.physics?.beginEntityUpdate?.(this.contraptions);
     const providedContext = this.runtimeContextProvider?.() || {};
     const runtimeContext = {
       ...providedContext,

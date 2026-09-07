@@ -382,11 +382,10 @@ test('a rotating block dropped onto a multi-block entity resolves every overlapp
 
     const fallingBox = falling.getCollisionWorldAABBs()[0];
     for (const supportBox of support.getCollisionWorldAABBs()) {
-      const overlap = Math.min(
-        Math.min(fallingBox.currentMaxX, supportBox.currentMaxX) - Math.max(fallingBox.currentMinX, supportBox.currentMinX),
-        Math.min(fallingBox.currentMaxY, supportBox.currentMaxY) - Math.max(fallingBox.currentMinY, supportBox.currentMinY),
-        Math.min(fallingBox.currentMaxZ, supportBox.currentMaxZ) - Math.max(fallingBox.currentMinZ, supportBox.currentMinZ)
-      );
+      // The rotating block may roll off the platform: overlapping world
+      // AABBs at that edge do not imply overlapping oriented solids. Check
+      // every original voxel with SAT, independently of the merged solver.
+      const overlap = physics.orientedBoxPairContact(fallingBox, supportBox)?.penetration || 0;
       if (overlap > 0) maximumRemainingOverlap = Math.max(maximumRemainingOverlap, overlap);
     }
   }

@@ -19,6 +19,7 @@ import {
   validateEntityScriptSyntax
 } from '../scripting/EntityScriptRuntime.ts';
 import { PLAYER_MASS_KG } from '../physics/PlayerPhysics.ts';
+import { mergeCollisionCells, type CollisionBox } from '../physics/CollisionGeometry.ts';
 
 // Must match createVoxelMesh(): the GPU bends these exact face vertices before
 // rasterization, so bent-space picking intersects the same two triangles shown
@@ -465,6 +466,7 @@ export class Contraption {
   /** Entity-level dynamics switch. Stopped entities keep collision/query
    * shapes but do not integrate, solve constraints, or receive impulses. */
   physicsSimulationEnabled: boolean;
+  physicsWakeVersion = 0;
   /** Original PB BodyConfig values captured before the first script-only mutation. */
   runtimeBodyConfigDefaults: Map<string, any>;
   isOnGround: boolean;
@@ -486,9 +488,11 @@ export class Contraption {
   /** Collision entries that can actually reach the exterior of their node's
    * voxel union. Fully enclosed voxels never contribute a contact. */
   collisionSurfaceEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }>;
+  collisionPhysicsBoxes: CollisionBox[];
+  collisionTerrainBoxes: CollisionBox[];
   collisionCellCount: number;
   collisionPoseVersion: number;
-  collisionWorldAabbCache: { version: number; all?: any[]; surface?: any[] } | null;
+  collisionWorldAabbCache: { version: number; all?: any[]; surface?: any[]; merged?: any[] } | null;
   collisionSamplePointCache: Map<string, { version: number; points: THREE.Vector3[] }>;
 
   // --- Applied forces ---
@@ -1623,6 +1627,7 @@ export class Contraption {
     const next = !!enabled;
     const resetHistory = options.resetHistory !== false;
     const wakingFromStop = next && this.physicsSimulationEnabled === false && resetHistory;
+    if (this.physicsSimulationEnabled !== next) this.physicsWakeVersion++;
     this.physicsSimulationEnabled = next;
     this.rootGroup.updateMatrixWorld(true);
 
@@ -2589,6 +2594,10 @@ export class Contraption {
         [x, y, z - span], [x, y, z + span]
       ].every(([nx, ny, nz]) => entryKeys.has(`${entityId}:${nx},${ny},${nz}:${span}`));
     });
+    this.collisionPhysicsBoxes = mergeCollisionCells(this.collisionEntries);
+    // Bound terrain-query volumes on rotated, large solid structures. Keep the
+    // original surface probes for support manifolds and swept terrain contacts.
+    this.collisionTerrainBoxes = mergeCollisionCells(this.collisionSurfaceEntries, 20);
     this.collisionCellCount = this.collisionCells.length;
     this.invalidateCollisionPoseCache?.();
   }
@@ -4685,14 +4694,15 @@ export class Contraption {
     return points;
   }
 
-  /**
-   * Return one world-space AABB per 0.2-quantized collision box. Micro voxels
-   * keep their 0.2-size shape; standard voxels span five micro cells per edge.
-   * The entity itself may be rotated, so all eight corners are transformed
-   * independently instead of treating the whole contraption as one box.
-   */
-  getCollisionWorldAABBs(surfaceOnly = false) {
-    const cacheKey: 'all' | 'surface' = surfaceOnly ? 'surface' : 'all';
+  /** Exact merged collision bounds for the entity solver. */
+  getPhysicsCollisionWorldAABBs() {
+    return this.getCollisionWorldAABBs(false, true);
+  }
+
+  /** World-space bounds, preserving individual voxels by default for player
+   * collision. Rotated boxes transform all eight corners in both poses. */
+  getCollisionWorldAABBs(surfaceOnly = false, merged = false) {
+    const cacheKey: 'all' | 'surface' | 'merged' = merged ? 'merged' : surfaceOnly ? 'surface' : 'all';
     if (
       this.collisionWorldAabbCache?.version === this.collisionPoseVersion
       && this.collisionWorldAabbCache[cacheKey]
@@ -4702,7 +4712,7 @@ export class Contraption {
     const boxes = [];
     const nodeTransforms = new Map();
 
-    const entries = surfaceOnly
+    const entries: any[] = merged ? this.collisionPhysicsBoxes : surfaceOnly
       ? (this.collisionSurfaceEntries || this.collisionEntries)
       : this.collisionEntries;
     for (const cell of entries) {
@@ -4716,9 +4726,9 @@ export class Contraption {
           : null;
         nodeTransforms.set(cell.entityId, transform);
       }
-      const x0 = cell.x * MICRO_SIZE, x1 = (cell.x + cell.span) * MICRO_SIZE;
-      const y0 = cell.y * MICRO_SIZE, y1 = (cell.y + cell.span) * MICRO_SIZE;
-      const z0 = cell.z * MICRO_SIZE, z1 = (cell.z + cell.span) * MICRO_SIZE;
+      const x0 = cell.x * MICRO_SIZE, x1 = (cell.x + (cell.spanX ?? cell.span)) * MICRO_SIZE;
+      const y0 = cell.y * MICRO_SIZE, y1 = (cell.y + (cell.spanY ?? cell.span)) * MICRO_SIZE;
+      const z0 = cell.z * MICRO_SIZE, z1 = (cell.z + (cell.spanZ ?? cell.span)) * MICRO_SIZE;
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
       let currentMinX = Infinity, currentMinY = Infinity, currentMinZ = Infinity;

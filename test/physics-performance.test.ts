@@ -107,7 +107,8 @@ test('aligned collision boxes scan half-open terrain ranges without neighbour am
   // per 100 aligned OBBs in each step. The old inclusive maximum queried all
   // eight neighbouring cells for every OBB.
   assert.equal(standardQueries, 3 * (1000 + 100));
-  assert.equal(microQueries, 3 * 100);
+  assert.ok(microQueries <= 3 * 10,
+    'merged terrain boxes should query the sparse micro layer in batches');
 });
 
 test('the manager builds entity broadphase candidates once for all frame substeps', () => {

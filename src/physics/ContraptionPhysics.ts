@@ -3,6 +3,8 @@ import { BlockTypes } from '../voxel/BlockTypes.ts';
 import { BodyType } from '../contraption/Contraption.ts';
 import { PHYSICS_SUBSTEPS_PER_ENTITY_UPDATE } from '../simulation/EntitySimulationClock.ts';
 import type { World } from '../voxel/World.ts';
+import { CollisionBoxIndex, collisionBoundsOf, collisionBoundsOverlap } from './CollisionGeometry.ts';
+import { ContraptionSleep } from './ContraptionSleep.ts';
 
 const ENTITY_BROADPHASE_CELL_SIZE = 32;
 const ENTITY_SWEEP_THRESHOLD = 0.05;
@@ -28,11 +30,45 @@ const TERRAIN_FACE_NORMALS = [
 
 export class ContraptionPhysics {
   private world: World;
+  private sleep: ContraptionSleep;
   private gravity: THREE.Vector3;
+  private collisionIndexes = new WeakMap<any[], CollisionBoxIndex<any>>();
+  private collisionBounds = new WeakMap<any[], ReturnType<typeof collisionBoundsOf>>();
+
+  physicsBoxes(contraption) {
+    return contraption.getPhysicsCollisionWorldAABBs?.() || contraption.getCollisionWorldAABBs?.() || [];
+  }
+
+  boxesBounds(boxes) {
+    let bounds = this.collisionBounds.get(boxes);
+    if (!bounds) {
+      bounds = collisionBoundsOf(boxes);
+      this.collisionBounds.set(boxes, bounds);
+    }
+    return bounds;
+  }
+
+  boxIndex(boxes) {
+    let index = this.collisionIndexes.get(boxes);
+    if (!index) {
+      index = new CollisionBoxIndex(boxes);
+      this.collisionIndexes.set(boxes, index);
+    }
+    return index;
+  }
 
   constructor(world) {
     this.world = world;
+    this.sleep = new ContraptionSleep(world);
     this.gravity = new THREE.Vector3(0, -18.0, 0);
+  }
+
+  beginEntityUpdate(contraptions) { this.sleep.setActiveEntities(contraptions); }
+
+  isSleeping(contraption) { return this.sleep.isSleeping(contraption); }
+
+  isInactiveCollider(contraption) {
+    return contraption.isPhysicsSimulationEnabled?.() === false || this.isSleeping(contraption);
   }
 
   /**
@@ -68,12 +104,20 @@ export class ContraptionPhysics {
    */
   prepareContraptionFrame(contraption, dt) {
     if (!contraption || !(dt > 0)) return null;
-    if (contraption.isPhysicsSimulationEnabled?.() === false) return null;
-    contraption.groundDistance = this.getGroundDistance(contraption.position);
+    if (contraption.isPhysicsSimulationEnabled?.() === false) {
+      this.sleep.suspend(contraption);
+      return null;
+    }
     contraption.syncKinematicBodies?.(dt);
     const bodies = contraption.getRigidBodies?.() || [];
     const dynamicBodies = bodies.filter(body => this.isSimulatedDynamicBody(body));
-    if (dynamicBodies.length === 0) return null;
+    if (dynamicBodies.length === 0) {
+      this.sleep.suspend(contraption);
+      contraption.groundDistance = this.getGroundDistance(contraption.position);
+      return null;
+    }
+    const sleeping = this.sleep.begin(contraption);
+    if (!sleeping) contraption.groundDistance = this.getGroundDistance(contraption.position);
 
     const frameInputs = new Map();
     for (const body of dynamicBodies) {
@@ -83,7 +127,7 @@ export class ContraptionPhysics {
       });
       body.appliedForces.set(0, 0, 0);
       body.appliedTorques.set(0, 0, 0);
-      body.isOnGround = false;
+      if (!sleeping) body.isOnGround = false;
     }
 
     const subSteps = PHYSICS_SUBSTEPS_PER_ENTITY_UPDATE;
@@ -92,7 +136,8 @@ export class ContraptionPhysics {
       dynamicBodies,
       frameInputs,
       subSteps,
-      substepDt: dt / subSteps
+      substepDt: dt / subSteps,
+      dt
     };
   }
 
@@ -102,6 +147,7 @@ export class ContraptionPhysics {
   stepContraptionFrame(frame) {
     if (!frame) return;
     const { contraption, dynamicBodies, frameInputs, substepDt } = frame;
+    if (this.isSleeping(contraption)) return;
     const sdt = substepDt;
     const previous = new Map();
     for (const body of dynamicBodies) {
@@ -139,6 +185,7 @@ export class ContraptionPhysics {
     if (!frame) return;
     const contraption = frame.contraption;
     contraption.isOnGround = contraption.getRigidBody?.(contraption.rootComponentId)?.isOnGround || false;
+    this.sleep.finish(contraption, frame.dt, frame.frameInputs);
   }
 
   inverseMass(body) {
@@ -324,6 +371,22 @@ export class ContraptionPhysics {
    * rebuilding identical buckets only creates garbage. */
   prepareContraptionPairFrame(contraptions, broadphaseBounds = null) {
     const colliders = (contraptions || []).filter(c => c?.getRigidBodies?.().length > 0);
+    // Editing/adding an immovable collider can overlap a sleeping body even
+    // without a moving neighbour. Wake that body before interleaved integration.
+    const sleepers = colliders.filter(collider => this.isSleeping(collider));
+    for (const collider of colliders) {
+      if (collider.isPhysicsSimulationEnabled?.() !== false
+        || !this.sleep.stoppedColliderChanged(collider)) continue;
+      if (sleepers.length === 0) continue;
+      const bounds = this.boxesBounds(this.physicsBoxes(collider));
+      for (const sleeper of sleepers) {
+        if (sleeper !== collider && collisionBoundsOverlap(bounds, this.boxesBounds(this.physicsBoxes(sleeper)))) {
+          this.sleep.wake(sleeper);
+        }
+      }
+    }
+    const inactive = colliders.map(collider => this.isInactiveCollider(collider));
+    if (inactive.every(Boolean)) return { colliders, collisionCandidates: [] };
     const buckets = new Map<string, number[]>();
     const candidates = new Map<string, [number, number]>();
     for (let index = 0; index < colliders.length; index++) {
@@ -341,6 +404,10 @@ export class ContraptionPhysics {
             const key = `${x},${y},${z}`;
             const bucket = buckets.get(key) || [];
             for (const other of bucket) {
+              // Keep sleeping pairs in mixed islands: an impact can wake a
+              // chain during this frame. Only explicit Stop is immutable.
+              if (colliders[other].isPhysicsSimulationEnabled?.() === false
+                && collider.isPhysicsSimulationEnabled?.() === false) continue;
               const a = Math.min(other, index);
               const b = Math.max(other, index);
               candidates.set(`${a},${b}`, [a, b]);
@@ -365,11 +432,12 @@ export class ContraptionPhysics {
     for (let iteration = 0; iteration < ENTITY_CONTACT_ITERATIONS; iteration++) {
       let resolvedContacts = 0;
       for (const [a, b] of collisionCandidates) {
+        if (this.isInactiveCollider(colliders[a]) && this.isInactiveCollider(colliders[b])) continue;
         // Every correction changes all world-space boxes on that body. Fresh
         // boxes let the solver propagate support through a stack instead of
         // leaving the next pair embedded until the following entity update.
-        const boxesA = colliders[a].getCollisionWorldAABBs?.() || [];
-        const boxesB = colliders[b].getCollisionWorldAABBs?.() || [];
+        const boxesA = this.physicsBoxes(colliders[a]);
+        const boxesB = this.physicsBoxes(colliders[b]);
         if (this.resolveContraptionPair(
           colliders[a],
           colliders[b],
@@ -390,7 +458,7 @@ export class ContraptionPhysics {
    */
   contraptionBroadphaseBounds(contraption) {
     const radius = Math.max(0.5, Number(contraption.boundingRadius) || 0.5) + 0.5;
-    const boxes = contraption.getCollisionWorldAABBs?.(true) || [];
+    const boxes = this.physicsBoxes(contraption);
     if (boxes.length === 0) {
       const center = typeof contraption.getWorldCenter === 'function'
         ? contraption.getWorldCenter()
@@ -404,14 +472,7 @@ export class ContraptionPhysics {
         maxZ: center.z + radius
       };
     }
-    return boxes.reduce((result, box) => ({
-      minX: Math.min(result.minX, box.minX),
-      minY: Math.min(result.minY, box.minY),
-      minZ: Math.min(result.minZ, box.minZ),
-      maxX: Math.max(result.maxX, box.maxX),
-      maxY: Math.max(result.maxY, box.maxY),
-      maxZ: Math.max(result.maxZ, box.maxZ)
-    }), { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity });
+    return this.boxesBounds(boxes);
   }
 
   /**
@@ -569,19 +630,19 @@ export class ContraptionPhysics {
       || contraption.getEntityNode?.();
     if (!node) return null;
     const quaternion = node.group.getWorldQuaternion(new THREE.Quaternion());
-    const size = cell.span * 0.2;
+    const sizes = [cell.spanX ?? cell.span, cell.spanY ?? cell.span, cell.spanZ ?? cell.span];
     const obb = {
       center: contraption.entityLocalToWorld(cell.entityId, new THREE.Vector3(
-        (cell.x + cell.span / 2) * 0.2,
-        (cell.y + cell.span / 2) * 0.2,
-        (cell.z + cell.span / 2) * 0.2
+        (cell.x + sizes[0] / 2) * 0.2,
+        (cell.y + sizes[1] / 2) * 0.2,
+        (cell.z + sizes[2] / 2) * 0.2
       )),
       axes: [
         new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion).normalize(),
         new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion).normalize(),
         new THREE.Vector3(0, 0, 1).applyQuaternion(quaternion).normalize()
       ],
-      halfExtents: [size / 2, size / 2, size / 2]
+      halfExtents: sizes.map(span => span * 0.1)
     };
     cache?.set(box, obb);
     return obb;
@@ -892,10 +953,14 @@ export class ContraptionPhysics {
   }
 
   resolveContraptionPair(a, b, boxesA = null, boxesB = null, allowSweep = true, dt = 1 / 60) {
-    if (a === b) return false;
+    if (a === b || (this.isInactiveCollider(a) && this.isInactiveCollider(b))) return false;
 
-    boxesA ||= a.getCollisionWorldAABBs?.() || [];
-    boxesB ||= b.getCollisionWorldAABBs?.() || [];
+    boxesA ||= this.physicsBoxes(a);
+    boxesB ||= this.physicsBoxes(b);
+    // Recheck at every substep/solver iteration: impulses and constraint
+    // corrections can move a previously disjoint pair inside the same tick.
+    if (!collisionBoundsOverlap(this.boxesBounds(boxesA), this.boxesBounds(boxesB))) return false;
+    const indexB = boxesB.length > 8 ? this.boxIndex(boxesB) : null;
     let bestSweep = null;
     let shallowestContact = null;
     const contactGroups = new Map();
@@ -904,7 +969,7 @@ export class ContraptionPhysics {
     const movedKinematicB = new Set();
 
     for (const ba of boxesA) {
-      for (const bb of boxesB) {
+      for (const bb of indexB ? indexB.query(ba) : boxesB) {
         // min/max include both previous and current poses. If these swept
         // hulls are disjoint, neither the current SAT nor CCD can possibly
         // produce a contact, so avoid all body lookup/vector allocation work.
@@ -976,6 +1041,13 @@ export class ContraptionPhysics {
           }
         }
       }
+    }
+
+    // Sleeping bodies retain their physical mass. A real contact wakes them;
+    // their already-prepared frame can integrate in the next interleaved substep.
+    if (bestSweep || contactGroups.size > 0) {
+      if (this.isSleeping(a)) this.sleep.wake(a);
+      if (this.isSleeping(b)) this.sleep.wake(b);
     }
 
     const sweepVerticalSeparation = bestSweep
@@ -1116,10 +1188,12 @@ export class ContraptionPhysics {
     if (normal.y < -0.5 && this.isSimulatedDynamicBody(bodyA)) {
       bodyA.isOnGround = true;
       if (bodyA.id === a.rootComponentId) a.isOnGround = true;
+      this.sleep.recordSupport(a, b);
     }
     if (normal.y > 0.5 && this.isSimulatedDynamicBody(bodyB)) {
       bodyB.isOnGround = true;
       if (bodyB.id === b.rootComponentId) b.isOnGround = true;
+      this.sleep.recordSupport(b, a);
     }
   }
 
@@ -1163,7 +1237,7 @@ export class ContraptionPhysics {
     const attached = contraption.getAttachedNodeIds?.(body.id) || new Set([body.id]);
     const boxes = [];
     const nodeTransforms = new Map();
-    for (const cell of contraption.collisionSurfaceEntries || contraption.collisionEntries || []) {
+    for (const cell of contraption.collisionTerrainBoxes || contraption.collisionSurfaceEntries || contraption.collisionEntries || []) {
       if (!attached.has(cell.entityId)) continue;
       if (contraption.isNodeCollisionEnabled?.(cell.entityId) === false) continue;
       const node = contraption.getEntityNode?.(cell.entityId) || contraption.getEntityNode?.();
@@ -1184,12 +1258,12 @@ export class ContraptionPhysics {
         nodeTransforms.set(cell.entityId, transform);
       }
       const axes = transform.axes;
-      const size = cell.span * 0.2;
-      const halfExtents = [size / 2, size / 2, size / 2];
+      const sizes = [cell.spanX ?? cell.span, cell.spanY ?? cell.span, cell.spanZ ?? cell.span];
+      const halfExtents = sizes.map(span => span * 0.1);
       const center = new THREE.Vector3(
-        (cell.x + cell.span / 2) * 0.2,
-        (cell.y + cell.span / 2) * 0.2,
-        (cell.z + cell.span / 2) * 0.2
+        (cell.x + sizes[0] / 2) * 0.2,
+        (cell.y + sizes[1] / 2) * 0.2,
+        (cell.z + sizes[2] / 2) * 0.2
       );
       if (transform.matrix) center.sub(transform.pivot).applyMatrix4(transform.matrix);
       else center.copy(contraption.localToWorld(center));
@@ -1881,6 +1955,7 @@ export class ContraptionPhysics {
   applyImpulse(contraption, impulse, worldPoint = null, nodeId = contraption?.rootComponentId) {
     const body = contraption.getRigidBody?.(nodeId);
     if (!this.isSimulatedDynamicBody(body)) return;
+    if (impulse.lengthSq() > 1e-12) this.sleep.wake(contraption);
     body.velocity.addScaledVector(impulse, 1 / body.mass);
 
     if (worldPoint) {
