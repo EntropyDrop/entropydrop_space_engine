@@ -10,9 +10,8 @@ import {
 } from '../torus/TorusWorld.ts';
 import type { SpaceStorage } from '../storage/SpaceStorage.ts';
 
-const STORAGE_SCHEMA_VERSION = 2;
-const STORAGE_PREFIX = 'space.world-edits.v2';
-const LEGACY_STORAGE_PREFIX = 'space.world-edits.v1';
+const STORAGE_SCHEMA_VERSION = 3;
+const STORAGE_PREFIX = 'space.world-edits.v3';
 const DEFAULT_SAVE_DELAY_MS = 75;
 const DEFAULT_REMOTE_BATCH_DELAY_MS = 200;
 const REMOTE_RETRY_DELAY_MS = 2_000;
@@ -200,10 +199,6 @@ export function worldEditStorageKey(worldId: string) {
   return `${STORAGE_PREFIX}.${encodeURIComponent(worldId)}`;
 }
 
-function legacyWorldEditStorageKey(worldId: string) {
-  return `${LEGACY_STORAGE_PREFIX}.${encodeURIComponent(worldId)}`;
-}
-
 /**
  * Sparse local cache plus durable remote outbox for player-authored terrain.
  *
@@ -215,7 +210,6 @@ function legacyWorldEditStorageKey(worldId: string) {
 export class WorldEditPersistence {
   readonly worldId: string;
   readonly storageKey: string;
-  private readonly legacyStorageKey: string;
   private readonly storage: WorldEditStorage | null;
   private readonly saveDelayMs: number;
   private readonly remoteBatchDelayMs: number;
@@ -246,7 +240,6 @@ export class WorldEditPersistence {
   constructor(options: WorldEditPersistenceOptions) {
     this.worldId = String(options.worldId || '').trim();
     this.storageKey = worldEditStorageKey(this.worldId);
-    this.legacyStorageKey = legacyWorldEditStorageKey(this.worldId);
     this.storage = options.storage === undefined ? resolveDefaultStorage() : options.storage;
     this.remote = options.remote ?? null;
     this.onSyncStatus = options.onSyncStatus ?? null;
@@ -490,7 +483,6 @@ export class WorldEditPersistence {
           savedAt: Date.now(),
         };
         this.storage.setItem(this.storageKey, JSON.stringify(payload));
-        this.storage.removeItem(this.legacyStorageKey);
       }
       this.dirty = false;
       return true;
@@ -859,12 +851,6 @@ export class WorldEditPersistence {
         return;
       }
 
-      const legacyRaw = this.storage.getItem(this.legacyStorageKey);
-      if (!legacyRaw) return;
-      const legacy = JSON.parse(legacyRaw);
-      if (legacy?.version !== 1 || legacy?.worldId !== this.worldId) return;
-      this.loadPackedEdits(legacy.standard, legacy.micro);
-      if (this.remote) this.queueLegacyOverlay(legacy.standard, legacy.micro);
     } catch (error) {
       console.warn('Space ignored an invalid persisted world-edit payload.', error);
       if (!this.remote) {
@@ -1025,33 +1011,6 @@ export class WorldEditPersistence {
       Math.floor(mutation.y),
       Math.floor(wrapZ(mutation.z))
     );
-  }
-
-  private queueLegacyOverlay(standardInput: unknown, microInput: unknown) {
-    const mutations: TerrainMutation[] = [];
-    for (const packed of Array.isArray(standardInput) ? standardInput : []) {
-      if (!Array.isArray(packed) || packed.length < 5) continue;
-      const edit = this.normalizeStandardEdit(
-        Number(packed[0]), Number(packed[1]), Number(packed[2]), Number(packed[3]), Number(packed[4])
-      );
-      if (edit) mutations.push({ kind: 'set_standard', ...edit });
-    }
-    for (const packed of Array.isArray(microInput) ? microInput : []) {
-      if (!Array.isArray(packed) || packed.length < 4) continue;
-      const edit = this.normalizeMicroEdit(
-        Number(packed[0]), Number(packed[1]), Number(packed[2]), Number(packed[3]), packed[4]
-      );
-      if (!edit) continue;
-      mutations.push({
-        kind: 'set_micro',
-        mx: edit.mx,
-        my: edit.my,
-        mz: edit.mz,
-        color: edit.color,
-        ...(edit.part ? { part: edit.part } : {}),
-      });
-    }
-    this.appendRestoredMutations(mutations);
   }
 
   private installLifecycleFlush() {

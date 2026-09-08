@@ -90,14 +90,32 @@ Stopped/stopped pairs are omitted; stopped entities still collide with active on
 
 Entities settle to sleep after one second of low motion when supported (or without
 gravity). Their authored run state stays unchanged. Impacts, forces, impulses,
-pose/shape/body-setting changes, Stop/Play, terrain revisions, chunk-window changes,
-and support movement/removal wake them. Running scripts remain awake to preserve
-contact observation and script timing. Hosts must expose a numeric `terrainVersion`
-and increment it on terrain collision changes to enable sleep; hosts without this
-notification continue simulating normally. Manager updates maintain the active
-support set so unloading a supporting entity wakes its load.
+pose/shape/body-setting changes, Stop/Play and support movement/removal wake them.
+World checks only overlapping terrain chunks and published micro partitions, so
+remote edits and unrelated streaming-window changes leave sleepers alone. Hosts
+without local collision stamps fall back to numeric `terrainVersion` and window
+invalidation; hosts without revision notifications keep simulating.
+Scripts still run every tick while physics sleeps. `ctx.contacts` retains resting
+support observations with `sleeping: true`, zero relative velocity and zero impulse;
+a script force wakes its body in the same update.
+
+Microterrain caches exact merged collision boxes and a BVH per 4 m partition.
+Geometry merges across colors and labels but never across holes. Live edits invalidate
+the live cache; published colliders remain immutable until the replacement mesh is
+published, including incremental chunk replacement and cross-layer subdivision.
+Torus queries unwrap these boxes into the caller's periodic window.
+
+The construction grid is 8×8×8: 512 cells of 0.125 m per standard 1 m block.
+The pure `src/voxel/MicroGrid.ts` constants are shared by editing, geometry, physics,
+inventory and the browser. Inventory v6, backpack v7, offline entities v4, local
+world edits v3 and far-surface snapshots v3 intentionally reject older formats.
+Backend deployment requires fresh Space content/storage; no historical migration
+or automatic deletion is included.
 
 Run a reproducible CPU benchmark with `node tools/benchmark-physics.ts`. It reports
 median/p95 time per 50 ms simulation update for 100 entities of 100 voxels each,
 with awake, stopped and sleeping cases. It excludes GPU drawing, terrain occupancy,
 scripts and network work; it does not estimate browser FPS.
+
+`node tools/benchmark-micro-terrain.ts` compares cell scans and cached box queries
+on the same 8³ microgrid, reporting cold-cache cost separately.

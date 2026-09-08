@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE, MICRO_CELLS_PER_BLOCK } from '../voxel/MicroGrid.ts';
 import {
   createFileRegistry,
   fromBinary,
@@ -23,14 +24,14 @@ import {
 } from '../generated/inventory.ts';
 import { INVENTORY_DESCRIPTOR_SET_BYTES } from '../generated/inventory_descriptor.ts';
 
-export const INVENTORY_PROTOBUF_SCHEMA_VERSION = 5;
-export const BACKPACK_PROTOBUF_SCHEMA_VERSION = 6;
+export const INVENTORY_PROTOBUF_SCHEMA_VERSION = 6;
+export const BACKPACK_PROTOBUF_SCHEMA_VERSION = 7;
 export const INVENTORY_PROTOBUF_MIME = 'application/x-protobuf';
 export const MAX_BACKPACK_SLOTS_PER_CATEGORY = 99;
 export type InventoryKind = 'blockset' | 'entity' | 'colorset';
 
 export interface PortableBackpack {
-  sourceSchemaVersion?: 6;
+  sourceSchemaVersion?: 7;
   activeCategory: InventoryKind;
   categories: Record<InventoryKind, {
     selected: number;
@@ -86,10 +87,10 @@ function requiredMessageDescriptor(typeName: string): DescMessage {
 }
 
 const INVENTORY_RESOURCE_DESCRIPTOR = requiredMessageDescriptor(
-  'entropydrop.space.inventory.v5.InventoryResource',
+  'entropydrop.space.inventory.v6.InventoryResource',
 );
 const BACKPACK_DESCRIPTOR = requiredMessageDescriptor(
-  'entropydrop.space.backpack.v6.Backpack',
+  'entropydrop.space.backpack.v7.Backpack',
 );
 
 function scalarWireType(type: ScalarType): WireType {
@@ -287,7 +288,7 @@ function voxelMessage(block: any): Voxel {
     dy: Number(block.dy),
     dz: Number(block.dz),
     microIndex: micro
-      ? 1 + Number(block.mx) + 5 * Number(block.my) + 25 * Number(block.mz)
+      ? 1 + Number(block.mx) + MICRO_DIVISIONS * Number(block.my) + MICRO_DIVISIONS ** 2 * Number(block.mz)
       : undefined,
     color: Number(block.color) >>> 0,
   };
@@ -303,17 +304,17 @@ function portableVoxel(block: Voxel): any {
   };
   if (block.microIndex !== undefined) {
     const packed = Number(block.microIndex) - 1;
-    if (!Number.isInteger(packed) || packed < 0 || packed >= 125) {
-      throw new Error('Micro voxel index is outside 0..124.');
+    if (!Number.isInteger(packed) || packed < 0 || packed >= MICRO_CELLS_PER_BLOCK) {
+      throw new Error('Micro voxel index is outside 0..511.');
     }
-    portable.mx = packed % 5;
-    portable.my = Math.floor(packed / 5) % 5;
-    portable.mz = Math.floor(packed / 25);
+    portable.mx = packed % MICRO_DIVISIONS;
+    portable.my = Math.floor(packed / MICRO_DIVISIONS) % MICRO_DIVISIONS;
+    portable.mz = Math.floor(packed / MICRO_DIVISIONS ** 2);
   }
   return portable;
 }
 
-/** Copy only the fields carried by the portable v5 voxel shape. */
+/** Copy only the fields carried by the portable v6 voxel shape. */
 function portableVoxelFields(block: any): any {
   const portable: any = {
     dx: canonicalDouble(block?.dx),
@@ -766,9 +767,9 @@ function previewVoxel(block: any, entity: boolean): any {
   const isMicro = block?.mx != null
     && block?.my != null
     && block?.mz != null;
-  const x = canonicalDouble(Number(block?.dx) + (isMicro ? Number(block.mx) / 5 : 0));
-  const y = canonicalDouble(Number(block?.dy) + (isMicro ? Number(block.my) / 5 : 0));
-  const z = canonicalDouble(Number(block?.dz) + (isMicro ? Number(block.mz) / 5 : 0));
+  const x = canonicalDouble(Number(block?.dx) + (isMicro ? Number(block.mx) / MICRO_DIVISIONS : 0));
+  const y = canonicalDouble(Number(block?.dy) + (isMicro ? Number(block.my) / MICRO_DIVISIONS : 0));
+  const z = canonicalDouble(Number(block?.dz) + (isMicro ? Number(block.mz) / MICRO_DIVISIONS : 0));
   const preview: any = entity
     ? {
       dx: canonicalDouble(block?.dx),
@@ -777,7 +778,7 @@ function previewVoxel(block: any, entity: boolean): any {
       localX: x,
       localY: y,
       localZ: z,
-      size: isMicro ? 0.2 : 1,
+      size: isMicro ? MICRO_SIZE : 1,
       block: 1,
       color: Number(block?.color) >>> 0,
       entityId: String(block?.entityId ?? ''),
@@ -786,7 +787,7 @@ function previewVoxel(block: any, entity: boolean): any {
       dx: x,
       dy: y,
       dz: z,
-      size: isMicro ? 0.2 : 1,
+      size: isMicro ? MICRO_SIZE : 1,
       block: 1,
       color: Number(block?.color) >>> 0,
     };
@@ -798,7 +799,7 @@ function previewVoxel(block: any, entity: boolean): any {
   return preview;
 }
 
-/** Convert portable v5 coordinates into the runtime shape used by thumbnail rendering. */
+/** Convert portable v6 coordinates into the runtime shape used by thumbnail rendering. */
 export function inventoryResourcePreviewItem(category: InventoryKind, portable: any): any {
   if (category === 'colorset') {
     return {

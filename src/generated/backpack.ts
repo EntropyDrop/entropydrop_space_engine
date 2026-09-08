@@ -8,7 +8,7 @@
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 import { InventoryResource } from "./inventory.ts";
 
-export const protobufPackage = "entropydrop.space.backpack.v6";
+export const protobufPackage = "entropydrop.space.backpack.v7";
 
 /**
  * Browser-local UI state. Backpack messages are never uploaded to the market;

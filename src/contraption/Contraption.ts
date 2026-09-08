@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroGrid.ts';
 import * as THREE from 'three';
 import { normalizeInventoryName } from '../storage/InventoryName.ts';
 import { BlockTypes, DEFAULT_BLOCK_COLOR } from '../voxel/BlockTypes.ts';
@@ -12,7 +13,6 @@ import {
   TORUS_SIZE_X,
   TORUS_SIZE_Z
 } from '../torus/TorusWorld.ts';
-import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroVoxelLayer.ts';
 import {
   EntityScriptRuntimeClient,
   remapEntityScriptChildIds,
@@ -95,7 +95,7 @@ function isFiniteVector3Array(value: any): boolean {
 function isMicroOffset(value: any): boolean {
   return isFiniteVector3Array(value)
     && value.slice(0, 3).every(part => Number.isInteger(Number(part))
-      && Number(part) >= 0 && Number(part) <= 4);
+      && Number(part) >= 0 && Number(part) < MICRO_DIVISIONS);
 }
 
 function scriptEditResult(field: 'placed' | 'removed', count: number, reason: string) {
@@ -480,8 +480,8 @@ export class Contraption {
   size: THREE.Vector3;
   localCenter: THREE.Vector3;
   blockMap: Map<string, any>;
-  /** Collision boxes quantized to the 0.2 micro grid: x/y/z are micro-cell
-   *  indices and span is the box edge length in micro cells (5 for a standard
+  /** Collision boxes quantized to the 0.125 micro grid: x/y/z are micro-cell
+   *  indices and span is the box edge length in micro cells (8 for a standard
    *  voxel, 1 for a micro voxel). */
   collisionCells: Array<{ x: number; y: number; z: number; span: number }>;
   collisionEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }>;
@@ -557,8 +557,8 @@ export class Contraption {
     this.collisionWorldAabbCache = null;
     this.collisionSamplePointCache = new Map();
 
-    // Collision is a union of per-voxel boxes quantized to the 0.2 micro
-    // grid, so micro voxels keep their own 0.2-size collision shape instead of
+    // Collision is a union of per-voxel boxes quantized to the 0.125 micro
+    // grid, so micro voxels keep their own 0.125-size collision shape instead of
     // inflating their whole 1x1x1 parent cell.
     this.buildCollisionCells();
     this.calculateBoundsAndCenter();
@@ -795,9 +795,9 @@ export class Contraption {
       action: 'place-micro',
       nodeId,
       micro: [
-        cell.x * 5 + Number(microOffset[0]),
-        cell.y * 5 + Number(microOffset[1]),
-        cell.z * 5 + Number(microOffset[2])
+        cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+        cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+        cell.z * MICRO_DIVISIONS + Number(microOffset[2])
       ],
       options
     });
@@ -827,9 +827,9 @@ export class Contraption {
       action: 'remove-micro',
       nodeId,
       micro: [
-        cell.x * 5 + Number(microOffset[0]),
-        cell.y * 5 + Number(microOffset[1]),
-        cell.z * 5 + Number(microOffset[2])
+        cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+        cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+        cell.z * MICRO_DIVISIONS + Number(microOffset[2])
       ]
     });
     return scriptEditResult('removed', result.removed || 0, result.reason);
@@ -1326,9 +1326,9 @@ export class Contraption {
           return Object.freeze({ ok: false, subdivided: 0, removed: 0, reason: 'invalid_position' });
         }
         const micro = clearOffset === null ? null : [
-          cell.x * 5 + Number(clearOffset[0]),
-          cell.y * 5 + Number(clearOffset[1]),
-          cell.z * 5 + Number(clearOffset[2])
+          cell.x * MICRO_DIVISIONS + Number(clearOffset[0]),
+          cell.y * MICRO_DIVISIONS + Number(clearOffset[1]),
+          cell.z * MICRO_DIVISIONS + Number(clearOffset[2])
         ];
         const result = this.performBasicAction({ action: 'subdivide-standard', nodeId: id, cell, micro });
         return Object.freeze({
@@ -1353,9 +1353,9 @@ export class Contraption {
           action: 'paint-micro',
           nodeId: id,
           micro: [
-            cell.x * 5 + Number(microOffset[0]),
-            cell.y * 5 + Number(microOffset[1]),
-            cell.z * 5 + Number(microOffset[2])
+            cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+            cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+            cell.z * MICRO_DIVISIONS + Number(microOffset[2])
           ],
           options
         });
@@ -1377,7 +1377,7 @@ export class Contraption {
 
   getLocalBlock(lx, ly, lz) {
     // A standard voxel fills its whole 1x1 cell, so the parent cell wins for
-    // any point inside it; otherwise fall back to the exact 0.2 micro cell.
+    // any point inside it; otherwise fall back to the exact 0.125 micro cell.
     const standardKey = `s:${Math.floor(lx + 1e-6)},${Math.floor(ly + 1e-6)},${Math.floor(lz + 1e-6)}`;
     const standard = this.blockMap.get(standardKey);
     if (standard !== undefined) return standard;
@@ -2566,7 +2566,7 @@ export class Contraption {
       const y = Math.floor(block.localY / MICRO_SIZE + 1e-6);
       const z = Math.floor(block.localZ / MICRO_SIZE + 1e-6);
       const entityId = block.entityId || this.rootComponentId;
-      // Whole voxels fill their 1x1 cell, micro voxels only their 0.2 cell.
+      // Whole voxels fill their 1x1 cell, micro voxels only their MICRO_SIZE cell.
       const cellKey = span > 1
         ? `s:${Math.floor(x / MICRO_DIVISIONS)},${Math.floor(y / MICRO_DIVISIONS)},${Math.floor(z / MICRO_DIVISIONS)}`
         : `m:${x},${y},${z}`;
@@ -2597,7 +2597,7 @@ export class Contraption {
     this.collisionPhysicsBoxes = mergeCollisionCells(this.collisionEntries);
     // Bound terrain-query volumes on rotated, large solid structures. Keep the
     // original surface probes for support manifolds and swept terrain contacts.
-    this.collisionTerrainBoxes = mergeCollisionCells(this.collisionSurfaceEntries, 20);
+    this.collisionTerrainBoxes = mergeCollisionCells(this.collisionSurfaceEntries, 4 * MICRO_DIVISIONS);
     this.collisionCellCount = this.collisionCells.length;
     this.invalidateCollisionPoseCache?.();
   }
@@ -3513,7 +3513,7 @@ export class Contraption {
   }
 
   /** Whole-voxel (1x1) parent-cell keys of one component, used by the child
-   *  selection UI. Collision itself runs on the finer 0.2 micro boxes. */
+   *  selection UI. Collision itself runs on the finer 0.125 micro boxes. */
   getEntityCollisionCellKeys(nodeId, bounds = null) {
     const keys = new Set();
     for (const block of this.blocks) {
@@ -3716,7 +3716,7 @@ export class Contraption {
     ];
 
     const meshCellMap = new Map();
-    const meshKey = (x, y, z, size) => `${Math.round(x * 5)},${Math.round(y * 5)},${Math.round(z * 5)},${Math.round(size * 5)}`;
+    const meshKey = (x, y, z, size) => `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`;
     for (const b of blocks) {
       const size = b.size || 1;
       meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
@@ -4646,7 +4646,7 @@ export class Contraption {
     };
 
     const hasMicro = (this.collisionSurfaceEntries || this.collisionEntries || []).some(
-      (cell: any) => (cell.span ?? 5) < 5
+      (cell: any) => (cell.span ?? MICRO_DIVISIONS) < MICRO_DIVISIONS
     );
     const sourceEntries: any[] = hasMicro && this.collisionTerrainBoxes?.length
       ? this.collisionTerrainBoxes
@@ -4657,7 +4657,7 @@ export class Contraption {
       if (!this.isNodeCollisionEnabled(cell.entityId)) continue;
       const transform = transformFor(cell.entityId);
       // Box corners in flat entity-local space, inset one millimetre so the
-      // samples stay strictly inside the 0.2-quantized collision box.
+      // samples stay strictly inside the 0.125-quantized collision box.
       const spanX = cell.spanX ?? cell.span;
       const spanY = cell.spanY ?? cell.span;
       const spanZ = cell.spanZ ?? cell.span;
@@ -5007,20 +5007,20 @@ export class Contraption {
 
     let placeMicroX, placeMicroY, placeMicroZ;
     if (size < 1) {
-      placeMicroX = block.localX + localNormal.x * 0.2;
-      placeMicroY = block.localY + localNormal.y * 0.2;
-      placeMicroZ = block.localZ + localNormal.z * 0.2;
+      placeMicroX = block.localX + localNormal.x * MICRO_SIZE;
+      placeMicroY = block.localY + localNormal.y * MICRO_SIZE;
+      placeMicroZ = block.localZ + localNormal.z * MICRO_SIZE;
     } else {
       const rawBlockLocal = localPoint.clone().add(node.pivotLocal);
       placeMicroX = localNormal.x !== 0
-        ? (localNormal.x > 0 ? block.localX + 1 : block.localX - 0.2)
-        : Math.floor(rawBlockLocal.x * 5) / 5;
+        ? (localNormal.x > 0 ? block.localX + 1 : block.localX - MICRO_SIZE)
+        : Math.floor(rawBlockLocal.x * MICRO_DIVISIONS) / MICRO_DIVISIONS;
       placeMicroY = localNormal.y !== 0
-        ? (localNormal.y > 0 ? block.localY + 1 : block.localY - 0.2)
-        : Math.floor(rawBlockLocal.y * 5) / 5;
+        ? (localNormal.y > 0 ? block.localY + 1 : block.localY - MICRO_SIZE)
+        : Math.floor(rawBlockLocal.y * MICRO_DIVISIONS) / MICRO_DIVISIONS;
       placeMicroZ = localNormal.z !== 0
-        ? (localNormal.z > 0 ? block.localZ + 1 : block.localZ - 0.2)
-        : Math.floor(rawBlockLocal.z * 5) / 5;
+        ? (localNormal.z > 0 ? block.localZ + 1 : block.localZ - MICRO_SIZE)
+        : Math.floor(rawBlockLocal.z * MICRO_DIVISIONS) / MICRO_DIVISIONS;
     }
 
     return {
@@ -5036,9 +5036,9 @@ export class Contraption {
       worldNormal,
       placeCell,
       placeMicroPos: {
-        localX: Math.round(placeMicroX * 5) / 5,
-        localY: Math.round(placeMicroY * 5) / 5,
-        localZ: Math.round(placeMicroZ * 5) / 5
+        localX: Math.round(placeMicroX * MICRO_DIVISIONS) / MICRO_DIVISIONS,
+        localY: Math.round(placeMicroY * MICRO_DIVISIONS) / MICRO_DIVISIONS,
+        localZ: Math.round(placeMicroZ * MICRO_DIVISIONS) / MICRO_DIVISIONS
       },
       color: block.color
     };
@@ -5060,7 +5060,7 @@ export class Contraption {
    * A transformed block cannot be represented by worldCenter +/- size / 2:
    * rotation makes its world extents wider on some axes. Selector range tests
    * use these eight transformed corners so moving/rotating nested components
-   * remain selectable, including 0.2 micro voxels.
+   * remain selectable, including 0.125 micro voxels.
    */
   getBlockWorldBounds(block, target = new THREE.Box3()) {
     target.makeEmpty();

@@ -11,3 +11,5 @@ export { preloadQuickJSScriptRuntime } from './scripting/QuickJSScriptWorkerCore
 export {
   wrapX, wrapZ, wrapChunkX, wrapChunkZ, unwrapPeriodicNear, TORUS_SIZE_X, TORUS_SIZE_Z,
 } from './torus/TorusWorld.ts';
+
+export { MICRO_DIVISIONS, MICRO_SIZE, MICRO_CELLS_PER_BLOCK } from './voxel/MicroGrid.ts';

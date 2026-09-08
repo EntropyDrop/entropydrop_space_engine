@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package entropydrop.space.backpack.v6;
+package entropydrop.space.backpack.v7;
 
 import "inventory.proto";
 
@@ -15,7 +15,7 @@ enum InventoryCategory {
 // The repeated BackpackSlot position is the local UI slot position. Empty
 // wrappers preserve internal gaps, and trailing empty slots are omitted.
 message BackpackSlot {
-  entropydrop.space.inventory.v5.InventoryResource resource = 1;
+  entropydrop.space.inventory.v6.InventoryResource resource = 1;
 }
 
 message InventoryGroup {

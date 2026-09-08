@@ -10,14 +10,16 @@ type SleepState = {
   pose: Pose | null;
   startPose: Pose | null;
   terrainVersion: number;
+  terrainStamp: any[] | null;
+  restingContacts: any[];
   chunkWindow: any;
   supports: Map<any, { pose: Pose; epoch: number }>;
   pendingSupports: Set<any>;
 };
 
 /** Whole contraptions sleep together, including their constrained bodies.
- * Script scheduling is unchanged. Entities running code stay awake so scripts
- * continue to observe fresh contact events at their existing cadence. */
+ * Script scheduling is unchanged. Sleeping bodies retain resting contact
+ * observations with zero impact impulse, and script forces wake them immediately. */
 export class ContraptionSleep {
   private states = new WeakMap<object, SleepState>();
   private activeEntities: Set<any> | null = null;
@@ -34,7 +36,7 @@ export class ContraptionSleep {
     let state = this.states.get(entity);
     if (!state) {
       state = { sleeping: false, quietTime: 0, epoch: 0, pose: null, startPose: null,
-        terrainVersion: 0, chunkWindow: null, supports: new Map(), pendingSupports: new Set() };
+        terrainVersion: 0, terrainStamp: null, restingContacts: [], chunkWindow: null, supports: new Map(), pendingSupports: new Set() };
       this.states.set(entity, state);
     }
     return state;
@@ -49,6 +51,7 @@ export class ContraptionSleep {
     state.quietTime = 0;
     state.epoch++;
     state.supports.clear();
+    state.restingContacts = [];
   }
 
   suspend(entity) {
@@ -85,9 +88,33 @@ export class ContraptionSleep {
     // sleeping there could miss a removed floor or a newly loaded collision chunk.
     if (!Number.isFinite(this.world.terrainVersion)) return false;
     if (entity.isPhysicsSimulationEnabled?.() === false) return false;
-    if (entity.scriptStatus !== 'stopped' && [...(entity.compiledNodeScripts?.keys?.() || [])]
-      .some(id => entity.isNodeScriptEnabled?.(id))) return false;
     return true;
+  }
+
+  private terrainStamp(entity): any[] | null {
+    if (typeof this.world.getTerrainCollisionStamp !== 'function') return null;
+    const boxes = entity.getPhysicsCollisionWorldAABBs?.() || entity.getCollisionWorldAABBs?.() || [];
+    if (!boxes.length) return this.world.getTerrainCollisionStamp({
+      minX: entity.position.x - 1, maxX: entity.position.x + 1,
+      minZ: entity.position.z - 1, maxZ: entity.position.z + 1,
+    });
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const box of boxes) {
+      minX = Math.min(minX, box.currentMinX ?? box.minX); maxX = Math.max(maxX, box.currentMaxX ?? box.maxX);
+      minZ = Math.min(minZ, box.currentMinZ ?? box.minZ); maxZ = Math.max(maxZ, box.currentMaxZ ?? box.maxZ);
+    }
+    return this.world.getTerrainCollisionStamp({ minX: minX - 0.1, maxX: maxX + 0.1,
+      minZ: minZ - 0.1, maxZ: maxZ + 0.1 });
+  }
+
+  private terrainChanged(entity, state: SleepState): boolean {
+    const current = this.terrainStamp(entity);
+    if (current === null || state.terrainStamp === null) {
+      return state.terrainVersion !== this.world.terrainVersion
+        || state.chunkWindow !== this.world.activeChunkKeys;
+    }
+    return current.length !== state.terrainStamp.length
+      || current.some((value, index) => value !== state.terrainStamp![index]);
   }
 
   begin(entity) {
@@ -98,8 +125,7 @@ export class ContraptionSleep {
     }
     if (state.sleeping) {
       const changed = !this.eligible(entity)
-        || state.terrainVersion !== this.world.terrainVersion
-        || state.chunkWindow !== this.world.activeChunkKeys
+        || this.terrainChanged(entity, state)
         || !this.samePose(state.pose, this.pose(entity))
         || (entity.getRigidBodies?.() || []).some(body => (
           body.velocity.lengthSq() > 1e-12 || body.angularVelocity.lengthSq() > 1e-12
@@ -115,6 +141,9 @@ export class ContraptionSleep {
     if (!state.sleeping) {
       state.startPose = this.pose(entity);
       state.pendingSupports.clear();
+    }
+    if (state.sleeping) {
+      for (const contact of state.restingContacts) entity.recordScriptContact?.(contact);
     }
     return state.sleeping;
   }
@@ -152,6 +181,15 @@ export class ContraptionSleep {
     }
     state.pose = pose;
     state.terrainVersion = this.world.terrainVersion;
+    state.terrainStamp = this.terrainStamp(entity);
+    // ctx.contacts describes contact observations, not discrete collision events.
+    // Preserve resting support without replaying the impulse of an old impact.
+    const supports = new Set([...state.pendingSupports].map(support => support.publicId));
+    state.restingContacts = (entity.pendingScriptContacts || [])
+      .filter(contact => contact.kind === 'terrain'
+        || (contact.kind === 'entity' && supports.has(contact.otherEntityId)))
+      .map(contact => ({ ...contact, relativeVelocity: [0, 0, 0], impulse: 0,
+        penetration: 0, sleeping: true }));
     state.chunkWindow = this.world.activeChunkKeys;
     state.supports = new Map([...state.pendingSupports].map(support => [support, {
       pose: this.pose(support), epoch: this.states.get(support)?.epoch || 0,

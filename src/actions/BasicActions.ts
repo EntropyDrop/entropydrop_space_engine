@@ -1,8 +1,8 @@
+import { MICRO_DIVISIONS, MICRO_SIZE, MICRO_CELLS_PER_BLOCK } from '../voxel/MicroGrid.ts';
 import * as THREE from 'three';
 import { BlockTypes, DEFAULT_BLOCK_COLOR } from '../voxel/BlockTypes.ts';
 import { CHUNK_SIZE_Y } from '../voxel/Chunk.ts';
 import { MAX_ENTITY_BOUNDS } from '../contraption/Contraption.ts';
-import { MICRO_DIVISIONS } from '../voxel/MicroVoxelLayer.ts';
 
 /** True when a size-meter block at entity-local (x,y,z) keeps the entity AABB within MAX_ENTITY_BOUNDS. */
 function entityAABBAllows(contraption, x, y, z, size = 1) {
@@ -199,10 +199,10 @@ function executeWorldAction(context: any, command: any) {
       return actionResult(command.action, painted, painted ? 'painted' : 'not_found', { painted });
     }
     case 'place-micro': {
-      if (!micro || micro.y < 0 || micro.y >= CHUNK_SIZE_Y * 5) {
+      if (!micro || micro.y < 0 || micro.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) {
         return actionResult(command.action, 0, 'invalid_position', { placed: 0 });
       }
-      const parent = { x: Math.floor(micro.x / 5), y: Math.floor(micro.y / 5), z: Math.floor(micro.z / 5) };
+      const parent = { x: Math.floor(micro.x / MICRO_DIVISIONS), y: Math.floor(micro.y / MICRO_DIVISIONS), z: Math.floor(micro.z / MICRO_DIVISIONS) };
       const occupied = (world.getBlock?.(parent.x, parent.y, parent.z) ?? BlockTypes.AIR) !== BlockTypes.AIR
         || !!world.getMicroBlock?.(micro.x, micro.y, micro.z);
       if (occupied && !command.replace) return actionResult(command.action, 0, 'occupied', { placed: 0 });
@@ -388,9 +388,9 @@ function executeEntityAction(context: any, command: any) {
     }
     case 'place-micro': {
       if (!micro) return actionResult(command.action, 0, 'invalid_position', { placed: 0 });
-      const localX = micro.x / 5;
-      const localY = micro.y / 5;
-      const localZ = micro.z / 5;
+      const localX = micro.x / MICRO_DIVISIONS;
+      const localY = micro.y / MICRO_DIVISIONS;
+      const localZ = micro.z / MICRO_DIVISIONS;
       const parent = finiteCell([localX, localY, localZ]);
       const standardOccupied = contraption.blocks.some(block => (block.size || 1) >= 1 && blockInCell(block, parent));
       const microOccupied = contraption.blocks.some(block => (
@@ -410,7 +410,7 @@ function executeEntityAction(context: any, command: any) {
         localX,
         localY,
         localZ,
-        size: 0.2,
+        size: MICRO_SIZE,
         color: entityNodeColor(contraption, nodeId, command.options ?? command.color),
         block: command.block || BlockTypes.COLOR_BLOCK,
         entityId: nodeId,
@@ -420,11 +420,11 @@ function executeEntityAction(context: any, command: any) {
       finishEntityMutation(context, contraption, 'place', nodeId, entityMutationEvent(command, {
         cell: [parent.x, parent.y, parent.z],
         microOffset: [
-          ((micro.x % 5) + 5) % 5,
-          ((micro.y % 5) + 5) % 5,
-          ((micro.z % 5) + 5) % 5
+          ((micro.x % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.y % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.z % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS
         ],
-        size: 0.2,
+        size: MICRO_SIZE,
         block: placedBlock.block,
         color: placedBlock.color
       }));
@@ -436,9 +436,9 @@ function executeEntityAction(context: any, command: any) {
         const field = command.action === 'paint-micro' ? 'painted' : 'removed';
         return actionResult(command.action, 0, 'invalid_position', { [field]: 0 });
       }
-      const localX = micro.x / 5;
-      const localY = micro.y / 5;
-      const localZ = micro.z / 5;
+      const localX = micro.x / MICRO_DIVISIONS;
+      const localY = micro.y / MICRO_DIVISIONS;
+      const localZ = micro.z / MICRO_DIVISIONS;
       const index = contraption.blocks.findIndex(block => (
         blockOwnerId(contraption, block) === nodeId
         && (block.size || 1) < 1
@@ -456,11 +456,11 @@ function executeEntityAction(context: any, command: any) {
         finishEntityMutation(context, contraption, 'color', nodeId, entityMutationEvent(command, {
           cell: [Math.floor(localX), Math.floor(localY), Math.floor(localZ)],
           microOffset: [
-            ((micro.x % 5) + 5) % 5,
-            ((micro.y % 5) + 5) % 5,
-            ((micro.z % 5) + 5) % 5
+            ((micro.x % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+            ((micro.y % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+            ((micro.z % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS
           ],
-          size: 0.2,
+          size: MICRO_SIZE,
           block: block.block,
           color: block.color
         }));
@@ -471,11 +471,11 @@ function executeEntityAction(context: any, command: any) {
       const empty = finishEntityMutation(context, contraption, 'remove', nodeId, entityMutationEvent(command, {
         cell: [Math.floor(localX), Math.floor(localY), Math.floor(localZ)],
         microOffset: [
-          ((micro.x % 5) + 5) % 5,
-          ((micro.y % 5) + 5) % 5,
-          ((micro.z % 5) + 5) % 5
+          ((micro.x % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.y % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.z % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS
         ],
-        size: 0.2,
+        size: MICRO_SIZE,
         block: removedBlock.block,
         color: removedBlock.color
       }));
@@ -513,14 +513,14 @@ function executeEntityAction(context: any, command: any) {
       if (index < 0) return actionResult(command.action, 0, 'not_found', { subdivided: 0, removed: 0 });
       const original = contraption.blocks[index];
       contraption.blocks.splice(index, 1);
-      for (let ix = 0; ix < 5; ix++) {
-        for (let iy = 0; iy < 5; iy++) {
-          for (let iz = 0; iz < 5; iz++) {
+      for (let ix = 0; ix < MICRO_DIVISIONS; ix++) {
+        for (let iy = 0; iy < MICRO_DIVISIONS; iy++) {
+          for (let iz = 0; iz < MICRO_DIVISIONS; iz++) {
             contraption.blocks.push({
-              localX: cell.x + ix * 0.2,
-              localY: cell.y + iy * 0.2,
-              localZ: cell.z + iz * 0.2,
-              size: 0.2,
+              localX: cell.x + ix * MICRO_SIZE,
+              localY: cell.y + iy * MICRO_SIZE,
+              localZ: cell.z + iz * MICRO_SIZE,
+              size: MICRO_SIZE,
               color: original.color ?? DEFAULT_BLOCK_COLOR,
               block: original.block || BlockTypes.COLOR_BLOCK,
               entityId: original.entityId ?? nodeId,
@@ -531,9 +531,9 @@ function executeEntityAction(context: any, command: any) {
       }
       let removed = 0;
       if (micro) {
-        const localX = micro.x / 5;
-        const localY = micro.y / 5;
-        const localZ = micro.z / 5;
+        const localX = micro.x / MICRO_DIVISIONS;
+        const localY = micro.y / MICRO_DIVISIONS;
+        const localZ = micro.z / MICRO_DIVISIONS;
         const carveIndex = contraption.blocks.findIndex(block => (
           blockOwnerId(contraption, block) === String(original.entityId ?? nodeId)
           && (block.size || 1) < 1
@@ -549,15 +549,15 @@ function executeEntityAction(context: any, command: any) {
       finishEntityMutation(context, contraption, 'subdivide', String(original.entityId ?? nodeId), entityMutationEvent(command, {
         cell: [cell.x, cell.y, cell.z],
         microOffset: micro ? [
-          ((micro.x % 5) + 5) % 5,
-          ((micro.y % 5) + 5) % 5,
-          ((micro.z % 5) + 5) % 5
+          ((micro.x % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.y % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS,
+          ((micro.z % MICRO_DIVISIONS) + MICRO_DIVISIONS) % MICRO_DIVISIONS
         ] : null,
-        size: 0.2,
+        size: MICRO_SIZE,
         block: original.block,
         color: original.color
       }));
-      return actionResult(command.action, 125, 'subdivided', { subdivided: 125, removed, empty: false });
+      return actionResult(command.action, MICRO_CELLS_PER_BLOCK, 'subdivided', { subdivided: MICRO_CELLS_PER_BLOCK, removed, empty: false });
     }
     case 'paint-blocks': {
       const selectedBlocks = Array.isArray(command.blocks) ? command.blocks : [];
@@ -1116,7 +1116,7 @@ function executeSelectionAction(context: any, command: any) {
       if (!manager?.hasValidSelection?.()) return actionResult(command.action, 0, 'no_selection', { removed: 0 });
       if (manager.microSelection !== null) {
         // Sparse micro selection (Selector micro mode): remove exactly the
-        // selected 0.2 m cells that hold a micro voxel.
+        // selected 0.125 m cells that hold a micro voxel.
         const world = context?.world;
         const subdividedStandardCells = new Set<string>();
         for (const cell of manager.microSelection) {

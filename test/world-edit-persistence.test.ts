@@ -60,11 +60,11 @@ test('standard and micro terrain edits survive constructing a fresh world after 
   assert.equal(first.setBlock(40, 80, 48, BlockTypes.COLOR_BLOCK, false, 0x123456), true);
   assert.equal(first.setBlock(41, 0, 48, BlockTypes.AIR, false), true);
 
-  // Persist standalone micro cells as well as the 125-cell subdivision path.
-  assert.equal(first.setMicroBlock(42 * 5 + 1, 80 * 5 + 2, 48 * 5 + 3, 0xabcdef, 'tip'), true);
+  // Persist standalone micro cells as well as the 512-cell subdivision path.
+  assert.equal(first.setMicroBlock(42 * 8 + 1, 80 * 8 + 2, 48 * 8 + 3, 0xabcdef, 'tip'), true);
   assert.equal(first.setBlock(43, 80, 48, BlockTypes.COLOR_BLOCK, false, 0x55aa33), true);
-  assert.equal(first.subdivideBlock(43, 80, 48), 125);
-  assert.equal(first.removeMicroBlock(43 * 5 + 4, 80 * 5 + 4, 48 * 5 + 4), true);
+  assert.equal(first.subdivideBlock(43, 80, 48), 512);
+  assert.equal(first.removeMicroBlock(43 * 8 + 4, 80 * 8 + 4, 48 * 8 + 4), true);
   assert.equal(first.flushPersistedEdits(), true);
 
   const second = new World(new THREE.Scene(), 1337, persistence) as any;
@@ -74,19 +74,19 @@ test('standard and micro terrain edits survive constructing a fresh world after 
   assert.equal(second.getBlockColor(40, 80, 48), 0x123456);
   assert.equal(second.getBlock(41, 0, 48), BlockTypes.AIR);
   assert.deepEqual(
-    second.getMicroBlock(42 * 5 + 1, 80 * 5 + 2, 48 * 5 + 3),
+    second.getMicroBlock(42 * 8 + 1, 80 * 8 + 2, 48 * 8 + 3),
     { block: BlockTypes.COLOR_BLOCK, color: 0xabcdef }
   );
-  assert.equal(second.microVoxels.parts.get(`${42 * 5 + 1},${80 * 5 + 2},${48 * 5 + 3}`), 'tip');
+  assert.equal(second.microVoxels.parts.get(`${42 * 8 + 1},${80 * 8 + 2},${48 * 8 + 3}`), 'tip');
   assert.equal(second.getBlock(43, 80, 48), BlockTypes.AIR);
-  assert.equal(second.getMicroBlock(43 * 5, 80 * 5, 48 * 5)?.color, 0x55aa33);
-  assert.equal(second.getMicroBlock(43 * 5 + 4, 80 * 5 + 4, 48 * 5 + 4), null);
+  assert.equal(second.getMicroBlock(43 * 8, 80 * 8, 48 * 8)?.color, 0x55aa33);
+  assert.equal(second.getMicroBlock(43 * 8 + 4, 80 * 8 + 4, 48 * 8 + 4), null);
 });
 
 test('world edit storage is isolated by world id and solid cells remove stale micro entries', () => {
   const storage = new MemoryStorage();
   const first = new WorldEditPersistence({ worldId: 'world-a', storage });
-  first.recordMicro(51, 101, 151, 0xabcdef);
+  first.recordMicro(81, 161, 241, 0xabcdef);
   first.recordStandard(10, 20, 30, BlockTypes.COLOR_BLOCK, 0x123456);
   assert.equal(first.flush(), true);
 
@@ -117,7 +117,7 @@ test('remote snapshot replacement touches only its indexed standard and micro ch
           chunk_z: 0,
           revision: 1,
           standard: [[17, 80, 1, BlockTypes.COLOR_BLOCK, 0x222222]],
-          micro: [[85, 100, 5, 0xbbbbbb]],
+          micro: [[136, 100, 5, 0xbbbbbb]],
         },
       ],
       async sendBatch() {}
@@ -146,7 +146,7 @@ test('remote snapshot replacement touches only its indexed standard and micro ch
   );
   assert.deepEqual(
     [...persistence.getMicroEditsForChunk(1, 0)].map(edit => edit.mx),
-    [85]
+    [136]
   );
 });
 
@@ -328,7 +328,7 @@ test('restored legacy outbox batches are repartitioned to the current spatial li
   const worldId = 'restored-spatial-outbox-world';
   const originalBatchId = '00000000-0000-4000-8000-000000000001';
   storage.setItem(worldEditStorageKey(worldId), JSON.stringify({
-    version: 2,
+    version: 3,
     worldId,
     pendingBatches: [{
       batchId: originalBatchId,
@@ -478,7 +478,7 @@ test('remote terrain outbox waits for IndexedDB durability before transmission',
   assert.equal(new Set(sent.map(batch => batch.batchId)).size, 2);
 });
 
-test('legacy browser-local edits are replayed over the server snapshot and uploaded once', async () => {
+test('obsolete browser-local grids are ignored without replay or upload', async () => {
   const storage = new MemoryStorage();
   const worldId = 'legacy-upload-world';
   storage.setItem(`space.world-edits.v1.${encodeURIComponent(worldId)}`, JSON.stringify({
@@ -507,9 +507,10 @@ test('legacy browser-local edits are replayed over the server snapshot and uploa
       }
     }
   });
-  await waitFor(() => sent.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 20));
 
-  assert.equal([...persistence.getStandardEditsForChunk(0, 1)].length, 2);
-  assert.deepEqual(sent[0].mutations.map(item => item.kind), ['set_standard', 'set_micro']);
-  assert.equal(storage.getItem(`space.world-edits.v1.${encodeURIComponent(worldId)}`), null);
+  assert.equal([...persistence.getStandardEditsForChunk(0, 1)].length, 1);
+  assert.deepEqual([...persistence.getMicroEdits()], []);
+  assert.deepEqual(sent, []);
+  assert.ok(storage.getItem(`space.world-edits.v1.${encodeURIComponent(worldId)}`));
 });

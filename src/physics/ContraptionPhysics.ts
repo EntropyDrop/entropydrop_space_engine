@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroGrid.ts';
 import * as THREE from 'three';
 import { BlockTypes } from '../voxel/BlockTypes.ts';
 import { BodyType } from '../contraption/Contraption.ts';
@@ -17,7 +18,7 @@ const EXACT_TERRAIN_CONTACT_SLOP = 0.005;
 const ENTITY_CONTACT_SLOP = 0.001;
 const RESTING_CONTACT_VELOCITY = 0.2;
 // A support manifold narrower than this is a point or line balance (unstable,
-// must topple); any real face rest, down to a 0.2m micro voxel, spans more.
+// must topple); any real face rest, down to a 0.125m micro voxel, spans more.
 const SUPPORT_WIDTH_NARROW = 0.05;
 const TERRAIN_FACE_NORMALS = [
   new THREE.Vector3(-1, 0, 0),
@@ -633,16 +634,16 @@ export class ContraptionPhysics {
     const sizes = [cell.spanX ?? cell.span, cell.spanY ?? cell.span, cell.spanZ ?? cell.span];
     const obb = {
       center: contraption.entityLocalToWorld(cell.entityId, new THREE.Vector3(
-        (cell.x + sizes[0] / 2) * 0.2,
-        (cell.y + sizes[1] / 2) * 0.2,
-        (cell.z + sizes[2] / 2) * 0.2
+        (cell.x + sizes[0] / 2) * MICRO_SIZE,
+        (cell.y + sizes[1] / 2) * MICRO_SIZE,
+        (cell.z + sizes[2] / 2) * MICRO_SIZE
       )),
       axes: [
         new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion).normalize(),
         new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion).normalize(),
         new THREE.Vector3(0, 0, 1).applyQuaternion(quaternion).normalize()
       ],
-      halfExtents: sizes.map(span => span * 0.1)
+      halfExtents: sizes.map(span => span * MICRO_SIZE / 2)
     };
     cache?.set(box, obb);
     return obb;
@@ -1205,9 +1206,9 @@ export class ContraptionPhysics {
       return { minX: bx, maxX: bx + 1, minY: by, maxY: by + 1, minZ: bz, maxZ: bz + 1 };
     }
 
-    const mx = Math.floor(point.x * 5);
-    const my = Math.floor(point.y * 5);
-    const mz = Math.floor(point.z * 5);
+    const mx = Math.floor(point.x * MICRO_DIVISIONS);
+    const my = Math.floor(point.y * MICRO_DIVISIONS);
+    const mz = Math.floor(point.z * MICRO_DIVISIONS);
     const collisionReader = (this.world as any).getMicroCollisionBlock;
     const micro = typeof collisionReader === 'function'
       ? collisionReader.call(this.world, mx, my, mz)
@@ -1216,12 +1217,12 @@ export class ContraptionPhysics {
         ?? null);
     if (micro === null || micro === undefined) return null;
     return {
-      minX: mx / 5,
-      maxX: (mx + 1) / 5,
-      minY: my / 5,
-      maxY: (my + 1) / 5,
-      minZ: mz / 5,
-      maxZ: (mz + 1) / 5
+      minX: mx / MICRO_DIVISIONS,
+      maxX: (mx + 1) / MICRO_DIVISIONS,
+      minY: my / MICRO_DIVISIONS,
+      maxY: (my + 1) / MICRO_DIVISIONS,
+      minZ: mz / MICRO_DIVISIONS,
+      maxZ: (mz + 1) / MICRO_DIVISIONS
     };
   }
 
@@ -1259,11 +1260,11 @@ export class ContraptionPhysics {
       }
       const axes = transform.axes;
       const sizes = [cell.spanX ?? cell.span, cell.spanY ?? cell.span, cell.spanZ ?? cell.span];
-      const halfExtents = sizes.map(span => span * 0.1);
+      const halfExtents = sizes.map(span => span * MICRO_SIZE / 2);
       const center = new THREE.Vector3(
-        (cell.x + sizes[0] / 2) * 0.2,
-        (cell.y + sizes[1] / 2) * 0.2,
-        (cell.z + sizes[2] / 2) * 0.2
+        (cell.x + sizes[0] / 2) * MICRO_SIZE,
+        (cell.y + sizes[1] / 2) * MICRO_SIZE,
+        (cell.z + sizes[2] / 2) * MICRO_SIZE
       );
       if (transform.matrix) center.sub(transform.pivot).applyMatrix4(transform.matrix);
       else center.copy(contraption.localToWorld(center));
@@ -1369,10 +1370,17 @@ export class ContraptionPhysics {
       maxY: obb.maxY,
       maxZ: obb.maxZ
     };
+    // Production worlds expose cached merged geometry. Small hosts and test
+    // worlds can retain the cell reader without losing exact collision semantics.
+    const mergedMicro = this.world.getMicroCollisionBoxesInAABB?.(bounds);
+    if (Array.isArray(mergedMicro)) {
+      boxes.push(...mergedMicro);
+      return boxes;
+    }
     const queriedMicro = this.world.getMicroBlocksInAABB?.(bounds, true);
     if (Array.isArray(queriedMicro)) {
       for (const cell of queriedMicro) {
-        const size = Number(cell.size) || 0.2;
+        const size = Number(cell.size) || MICRO_SIZE;
         boxes.push({
           minX: cell.x,
           maxX: cell.x + size,
@@ -1383,21 +1391,21 @@ export class ContraptionPhysics {
         });
       }
     } else if (typeof (this.world as any).getMicroBlock === 'function') {
-      const maxMx = Math.floor(obb.maxX * 5 - 1e-7);
-      const maxMy = Math.floor(obb.maxY * 5 - 1e-7);
-      const maxMz = Math.floor(obb.maxZ * 5 - 1e-7);
-      for (let mx = Math.floor(obb.minX * 5); mx <= maxMx; mx++) {
-        for (let my = Math.floor(obb.minY * 5); my <= maxMy; my++) {
-          for (let mz = Math.floor(obb.minZ * 5); mz <= maxMz; mz++) {
+      const maxMx = Math.floor(obb.maxX * MICRO_DIVISIONS - 1e-7);
+      const maxMy = Math.floor(obb.maxY * MICRO_DIVISIONS - 1e-7);
+      const maxMz = Math.floor(obb.maxZ * MICRO_DIVISIONS - 1e-7);
+      for (let mx = Math.floor(obb.minX * MICRO_DIVISIONS); mx <= maxMx; mx++) {
+        for (let my = Math.floor(obb.minY * MICRO_DIVISIONS); my <= maxMy; my++) {
+          for (let mz = Math.floor(obb.minZ * MICRO_DIVISIONS); mz <= maxMz; mz++) {
             const micro = (this.world as any).getMicroBlock(mx, my, mz);
             if (micro === null || micro === undefined) continue;
             boxes.push({
-              minX: mx / 5,
-              maxX: (mx + 1) / 5,
-              minY: my / 5,
-              maxY: (my + 1) / 5,
-              minZ: mz / 5,
-              maxZ: (mz + 1) / 5
+              minX: mx / MICRO_DIVISIONS,
+              maxX: (mx + 1) / MICRO_DIVISIONS,
+              minY: my / MICRO_DIVISIONS,
+              maxY: (my + 1) / MICRO_DIVISIONS,
+              minZ: mz / MICRO_DIVISIONS,
+              maxZ: (mz + 1) / MICRO_DIVISIONS
             });
           }
         }
@@ -1813,7 +1821,7 @@ export class ContraptionPhysics {
     // Perfect voxels can balance forever on a sampled corner or edge. Mimic
     // real contact asymmetry only on narrow upward support manifolds: a
     // support whose points span a point or a line has width ~0 and is
-    // unstable, while any real face rest - including a 0.2m micro voxel face -
+    // unstable, while any real face rest - including a 0.125m micro voxel face -
     // spans a visible area. This adds no linear energy and never turns a wall
     // collision into auto-levelling.
     if (normal.y > 0.5 && this.supportWidth(contactPoints, normal) < SUPPORT_WIDTH_NARROW) {

@@ -7,7 +7,7 @@
 /* eslint-disable */
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 
-export const protobufPackage = "entropydrop.space.inventory.v5";
+export const protobufPackage = "entropydrop.space.inventory.v6";
 
 export const BodyType = { BODY_TYPE_DYNAMIC: 0, BODY_TYPE_KINEMATIC: 1, UNRECOGNIZED: -1 } as const;
 
@@ -58,7 +58,7 @@ export interface Voxel {
   dz?:
     | number
     | undefined;
-  /** Present only for micro voxels. Value = 1 + mx + 5*my + 25*mz. */
+  /** Present only for micro voxels. Value = 1 + mx + 8*my + 64*mz (mx/my/mz in 0..7). */
   microIndex?: number | undefined;
   color?: number | undefined;
 }
@@ -123,7 +123,7 @@ export interface Component {
   /**
    * Parent-relative authored transform. The root omits these fields.
    * local_rotation is restricted to the 24 axis-aligned cube orientations so
-   * Stop restores every owned voxel to one shared 0.2-unit construction grid.
+   * Stop restores every owned voxel to one shared 0.125-unit construction grid.
    */
   localPosition?: Vector3 | undefined;
   localRotation?:

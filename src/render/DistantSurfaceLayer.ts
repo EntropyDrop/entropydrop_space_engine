@@ -1,3 +1,4 @@
+import { MICRO_SIZE } from '../voxel/MicroGrid.ts';
 import * as THREE from 'three';
 import type { SurfaceZoneSnapshot } from '../voxel/SurfaceZoneSnapshot.ts';
 import { TORUS_SIZE_X, TORUS_SIZE_Z, hookSceneMaterials } from '../torus/TorusWorld.ts';
@@ -165,7 +166,7 @@ varying float vSurfaceHeight;
 const SURFACE_BEGIN_VERTEX = `
 vec3 transformed = vec3(
   position.x * surfaceSize + surfaceOffset.x,
-  position.y * surfaceHeight * 0.2,
+  position.y * surfaceHeight * ${MICRO_SIZE},
   position.z * surfaceSize + surfaceOffset.y
 );
 vSurfaceFlatPosition = transformed.xz;
@@ -196,7 +197,7 @@ float surfaceAlongPosition = surfaceWinding >= 0.0 ? position.x : 1.0 - position
 vec2 surfaceFlatPosition = surfaceOffset + surfaceAlong * surfaceAlongPosition * surfaceSize;
 vec3 transformed = vec3(
   surfaceFlatPosition.x,
-  mix(surfaceBottomHeight, surfaceHeight, position.y) * 0.2,
+  mix(surfaceBottomHeight, surfaceHeight, position.y) * ${MICRO_SIZE},
   surfaceFlatPosition.y
 );
 vSurfaceFlatPosition = transformed.xz;

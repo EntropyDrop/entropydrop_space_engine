@@ -66,10 +66,10 @@ test('entity standard placements stay within the 64×64×64 AABB', () => {
 test('entity micro placements respect the cap through their parent cell', () => {
   const { entity, manager } = makeEntity(2);
 
-  // Micro index 319 -> local 63.8 -> parent cell 63: span 64, allowed.
-  assert.equal(placeMicro(entity, manager, [319, 0, 0]).reason, 'placed');
-  // Micro index 321 -> local 64.2 -> parent cell 64: span 65, rejected.
-  assert.equal(placeMicro(entity, manager, [321, 0, 0]).reason, 'bounds_exceeded');
+  // Micro index 511 -> local 63.875 -> parent cell 63: span 64, allowed.
+  assert.equal(placeMicro(entity, manager, [511, 0, 0]).reason, 'placed');
+  // Micro index 513 -> local 64.125 -> parent cell 64: span 65, rejected.
+  assert.equal(placeMicro(entity, manager, [513, 0, 0]).reason, 'bounds_exceeded');
   assert.equal(entity.blocks.length, 2);
 });
 

@@ -1,3 +1,4 @@
+import { CollisionBoxIndex, mergeCollisionCells, type CollisionBounds } from '../physics/CollisionGeometry.ts';
 import * as THREE from 'three';
 import { DEFAULT_BLOCK_COLOR, normalizeColor } from './BlockTypes.ts';
 import {
@@ -10,12 +11,12 @@ import {
   wrapMicroZ
 } from '../torus/TorusWorld.ts';
 
-export const MICRO_DIVISIONS = 5;
-export const MICRO_SIZE = 1 / MICRO_DIVISIONS;
+import { MICRO_DIVISIONS, MICRO_SIZE } from './MicroGrid.ts';
+export { MICRO_DIVISIONS, MICRO_SIZE } from './MicroGrid.ts';
 const STANDARD_CHUNK_MICRO_SIZE = 16 * MICRO_DIVISIONS;
 // Smaller than a standard terrain chunk so a dense imported model cannot turn
 // one mesh rebuild into a long main-thread task. These are meshing partitions,
-// not distance-based LOD: every 0.2 m cell remains represented exactly.
+// not distance-based LOD: every 0.125 m cell remains represented exactly.
 const MICRO_MESH_CHUNK_SIZE = 4 * MICRO_DIVISIONS;
 const MICRO_MESH_CHUNKS_PER_STANDARD_AXIS = STANDARD_CHUNK_MICRO_SIZE / MICRO_MESH_CHUNK_SIZE;
 const MICRO_WORLD_SIZE_X = TORUS_SIZE_X * MICRO_DIVISIONS;
@@ -124,6 +125,9 @@ export class MicroVoxelLayer {
   private deferredMeshPublications: Map<string, DeferredMeshPublication>;
   private recentlyRebuiltMeshes: THREE.Mesh[];
   private meshTempColor: THREE.Color;
+  private collisionIndexes = new Map<string, CollisionBoxIndex<CollisionBounds>>();
+  private publishedCollisionIndexes = new Map<string, CollisionBoxIndex<CollisionBounds>>();
+  private collisionPublicationVersions = new Map<string, number>();
   material: THREE.MeshStandardMaterial;
 
   constructor() {
@@ -161,6 +165,7 @@ export class MicroVoxelLayer {
   }
 
   private invalidateMeshChunk(chunkKey: string) {
+    this.collisionIndexes.delete(chunkKey);
     // A staged mesh is immutable for the revision that produced it. Retire it
     // as soon as a newer edit invalidates that revision; otherwise an inactive
     // boundary companion cannot rebuild and its stale deferred entry can hold
@@ -370,6 +375,10 @@ export class MicroVoxelLayer {
         const targetMz = originMz + dz * MICRO_MESH_CHUNK_SIZE;
         const targetKey = meshChunkKey(targetMx, targetMz);
         targetMeshChunks.push(targetKey);
+        // Snapshot the complete published shape before the live index is detached.
+        // Incremental clearing must never expose a partially removed collider.
+        if (this.meshChunks.has(targetKey)) this.collisionIndexForPartition(targetKey, true);
+        this.collisionIndexes.delete(targetKey);
         const cellKeys = this.chunkCells.get(targetKey);
         if (cellKeys?.size) cellIterators.push(cellKeys.values());
         this.chunkCells.delete(targetKey);
@@ -461,7 +470,7 @@ export class MicroVoxelLayer {
 
   /**
    * Remove and return every microcell whose integer micro indices fall inside
-   * the inclusive [min..max] range. Micro indices are absolute (0.2 m grid),
+   * the inclusive [min..max] range. Micro indices are absolute (0.125 m grid),
    * so callers can target a single cell by passing equal min/max values.
    */
   extractCellsInBox(minMx, minMy, minMz, maxMx, maxMy, maxMz) {
@@ -545,6 +554,78 @@ export class MicroVoxelLayer {
       }
     }
     return cells;
+  }
+
+  /** Exact geometry-only colliders. Color and editor part labels do not split solids. */
+  private collisionIndexForPartition(chunkKey: string, published: boolean) {
+    const cache = published ? this.publishedCollisionIndexes : this.collisionIndexes;
+    const cached = cache.get(chunkKey);
+    if (cached) return cached;
+    const snapshot = published ? this.publishedCollisionSnapshots.get(chunkKey) : null;
+    const keys = new Set(this.chunkCells.get(chunkKey));
+    for (const packed of snapshot?.keys() ?? []) keys.add(packed);
+    const cells = [];
+    for (const packed of keys) {
+      const value = snapshot?.has(packed) ? snapshot.get(packed) : this.packedColors.get(packed);
+      if (value === null || value === undefined) continue;
+      const [x, y, z] = unpackMicroKey(packed);
+      cells.push({ x, y, z, span: 1, entityId: 'terrain' });
+    }
+    const boxes = mergeCollisionCells(cells, MICRO_MESH_CHUNK_SIZE).map(box => ({
+      minX: box.x * MICRO_SIZE, maxX: (box.x + box.spanX) * MICRO_SIZE,
+      minY: box.y * MICRO_SIZE, maxY: (box.y + box.spanY) * MICRO_SIZE,
+      minZ: box.z * MICRO_SIZE, maxZ: (box.z + box.spanZ) * MICRO_SIZE,
+    }));
+    const index = new CollisionBoxIndex(boxes);
+    cache.set(chunkKey, index);
+    return index;
+  }
+
+  /** Query occupied partitions, never the empty microcells in an AABB's volume. */
+  getCollisionBoxesInAABB(
+    bounds: CollisionBounds,
+    published = false,
+    partitionAllowed?: (mx: number, mz: number) => boolean,
+  ): CollisionBounds[] {
+    const result: CollisionBounds[] = [];
+    const partitionSize = MICRO_MESH_CHUNK_SIZE * MICRO_SIZE;
+    const minCx = Math.floor(bounds.minX / partitionSize);
+    const maxCx = Math.floor(bounds.maxX / partitionSize);
+    const minCz = Math.floor(bounds.minZ / partitionSize);
+    const maxCz = Math.floor(bounds.maxZ / partitionSize);
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      for (let cz = minCz; cz <= maxCz; cz++) {
+        const mx = cx * MICRO_MESH_CHUNK_SIZE;
+        const mz = cz * MICRO_MESH_CHUNK_SIZE;
+        const chunkKey = meshChunkKey(mx, mz);
+        if (partitionAllowed && !partitionAllowed(mx, mz)) continue;
+        if (published ? !this.meshChunks.has(chunkKey) : !this.chunkCells.has(chunkKey)) continue;
+        const offsetX = (mx - wrapMicroX(mx)) * MICRO_SIZE;
+        const offsetZ = (mz - wrapMicroZ(mz)) * MICRO_SIZE;
+        const query = { ...bounds,
+          minX: bounds.minX - offsetX, maxX: bounds.maxX - offsetX,
+          minZ: bounds.minZ - offsetZ, maxZ: bounds.maxZ - offsetZ };
+        for (const box of this.collisionIndexForPartition(chunkKey, published).query(query)) {
+          result.push(offsetX === 0 && offsetZ === 0 ? box : { ...box,
+            minX: box.minX + offsetX, maxX: box.maxX + offsetX,
+            minZ: box.minZ + offsetZ, maxZ: box.maxZ + offsetZ });
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Local publication counters for sleep invalidation, including empty partitions. */
+  getCollisionStamp(chunkX: number, chunkZ: number): number[] {
+    const versions: number[] = [];
+    for (let dx = 0; dx < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dx++) {
+      for (let dz = 0; dz < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dz++) {
+        const chunkKey = meshChunkKey(chunkX * STANDARD_CHUNK_MICRO_SIZE + dx * MICRO_MESH_CHUNK_SIZE,
+          chunkZ * STANDARD_CHUNK_MICRO_SIZE + dz * MICRO_MESH_CHUNK_SIZE);
+        versions.push(this.collisionPublicationVersions.get(chunkKey) ?? 0);
+      }
+    }
+    return versions;
   }
 
   getPublishedCollisionColor(mx: number, my: number, mz: number) {
@@ -1076,6 +1157,9 @@ export class MicroVoxelLayer {
     // Mesh publication and collision publication share the same synchronous
     // commit point, including empty -> filled and empty -> empty partitions.
     this.publishedCollisionSnapshots.delete(job.chunkKey);
+    this.publishedCollisionIndexes.delete(job.chunkKey);
+    this.collisionPublicationVersions.set(job.chunkKey,
+      (this.collisionPublicationVersions.get(job.chunkKey) ?? 0) + 1);
     if (!previous) return;
     this.group.remove(previous);
     previous.geometry.dispose();

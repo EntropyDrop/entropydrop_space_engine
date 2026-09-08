@@ -136,13 +136,60 @@ test('airborne gravity bodies and hosts without terrain invalidation never sleep
   assert.equal(physics.isSleeping(unversioned), false);
 });
 
-test('running scripts keep their update and contact-observation cadence', () => {
-  const { physics, add, tick } = setup();
+test('sleeping scripts retain tick cadence and resting contacts, then wake on script force', () => {
+  const { physics, add, tick } = setup(true);
   const entity = add();
-  assert.equal(entity.setScript('const tick = ctx.tick;'), true);
-  tick(30);
+  assert.equal(entity.setScript(`
+self.state.ticks = (self.state.ticks || 0) + 1;
+self.state.contacts = ctx.contacts;
+self.state.grounded = ctx.isOnGround;
+if (self.state.kick) self.applyForce([1000, 0, 0]);
+`), true);
+  tick(80);
+  assert.equal(physics.isSleeping(entity), true);
+  const before = entity.getComponentState('root').ticks;
+  tick(10);
+  const state = entity.getComponentState('root');
+  assert.equal(state.ticks, before + 10);
+  assert.equal(state.grounded, true);
+  assert.ok(state.contacts.length > 0);
+  assert.ok(state.contacts.every(contact => contact.kind === 'terrain' && contact.sleeping
+    && contact.impulse === 0 && contact.relativeVelocity.every(value => value === 0)));
+  state.kick = true;
+  tick();
   assert.equal(physics.isSleeping(entity), false);
-  assert.ok(entity.tickCount >= 30);
+  assert.ok(entity.velocity.x > 0);
+});
+
+test('only a local terrain stamp or local streaming change wakes a sleeping body', () => {
+  const { world, physics, add, tick } = setup(true);
+  const revisions = new Map([[0, 0], [2, 0]]);
+  const loaded = new Set([0, 2]);
+  (world as any).getTerrainCollisionStamp = bounds => {
+    const chunk = Math.floor((bounds.minX + bounds.maxX) / 2 / 16);
+    return [revisions.get(chunk) || 0, loaded.has(chunk)];
+  };
+  const local = add('local', 2), remote = add('remote', 34);
+  tick(80);
+  assert.ok([local, remote].every(entity => physics.isSleeping(entity)));
+  revisions.set(2, 1);
+  world.terrainVersion++;
+  (world as any).activeChunkKeys = new Set(['0,0', '2,0', '99,99']);
+  tick();
+  assert.equal(physics.isSleeping(local), true, 'distant edits and window identity are irrelevant');
+  assert.equal(physics.isSleeping(remote), false, 'the edited neighbourhood wakes');
+  tick(30);
+  loaded.delete(0);
+  tick();
+  assert.equal(physics.isSleeping(local), false, 'unloading local collision wakes its sleeper');
+  assert.equal(physics.isSleeping(remote), true);
+  tick(30);
+  revisions.set(0, 1);
+  world.floor = false;
+  const height = local.position.y;
+  tick();
+  assert.equal(physics.isSleeping(local), false);
+  assert.ok(local.position.y < height, 'removing local support lets the body fall');
 });
 
 test('a settled dynamic stack sleeps together and wakes when the ground changes', () => {

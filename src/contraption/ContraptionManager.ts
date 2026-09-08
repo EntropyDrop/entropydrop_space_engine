@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroGrid.ts';
 import * as THREE from 'three';
 import {
   BodyType,
@@ -20,12 +21,11 @@ import {
   wrapMicroX,
   wrapMicroZ
 } from '../torus/TorusWorld.ts';
-import { MICRO_DIVISIONS } from '../voxel/MicroVoxelLayer.ts';
 import { ActionDomain, executeBasicAction } from '../actions/BasicActions.ts';
 import type { SpaceStorage } from '../storage/SpaceStorage.ts';
 
 export const ENTITY_STORAGE_PREFIX = 'entropydrop_space_entities';
-export const ENTITY_STORAGE_VERSION = 3;
+export const ENTITY_STORAGE_VERSION = 4;
 
 export function worldEntitiesStorageKey(worldId: string) {
   return `${ENTITY_STORAGE_PREFIX}.${encodeURIComponent(worldId || 'default')}`;
@@ -42,7 +42,7 @@ function isFiniteVector3Array(value: any): boolean {
 function isMicroOffset(value: any): boolean {
   return isFiniteVector3Array(value)
     && value.slice(0, 3).every(part => Number.isInteger(Number(part))
-      && Number(part) >= 0 && Number(part) <= 4);
+      && Number(part) >= 0 && Number(part) < MICRO_DIVISIONS);
 }
 
 function scriptEditResult(field: 'placed' | 'removed', count: number, reason: string) {
@@ -118,7 +118,7 @@ export class ContraptionManager {
     this.selectionCornerB = null;
     this.gluePoints = []; // World Super Glue box mode: three points.
     this.connectedSelection = null; // World single mode: explicit cells, or null in box mode.
-    this.microSelection = null; // World micro single mode: explicit 0.2 m cells, or null in standard mode.
+    this.microSelection = null; // World micro single mode: explicit 0.125 m cells, or null in standard mode.
     this.childSelection = null; // { contraption, parentId, mode, points, cells }
     this.entitySelection = null; // Shared entity subtree/block selection used by mouse and scripts.
     this.selectionHost = null; // Player-side selector state invalidated by shared runtime actions.
@@ -187,9 +187,9 @@ export class ContraptionManager {
           return Object.freeze({ ok: false, subdivided: 0, removed: 0, reason: 'invalid_position' });
         }
         const micro = clearOffset === null ? null : [
-          cell.x * 5 + Number(clearOffset[0]),
-          cell.y * 5 + Number(clearOffset[1]),
-          cell.z * 5 + Number(clearOffset[2])
+          cell.x * MICRO_DIVISIONS + Number(clearOffset[0]),
+          cell.y * MICRO_DIVISIONS + Number(clearOffset[1]),
+          cell.z * MICRO_DIVISIONS + Number(clearOffset[2])
         ];
         const result = executeBasicAction({ manager: this, world: this.world }, {
           domain: ActionDomain.WORLD,
@@ -216,9 +216,9 @@ export class ContraptionManager {
           domain: ActionDomain.WORLD,
           action: 'get-micro',
           micro: [
-            cell.x * 5 + Number(microOffset[0]),
-            cell.y * 5 + Number(microOffset[1]),
-            cell.z * 5 + Number(microOffset[2])
+            cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+            cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+            cell.z * MICRO_DIVISIONS + Number(microOffset[2])
           ],
           actor: { source: 'script' }
         });
@@ -233,9 +233,9 @@ export class ContraptionManager {
           domain: ActionDomain.WORLD,
           action: 'place-micro',
           micro: [
-            cell.x * 5 + Number(microOffset[0]),
-            cell.y * 5 + Number(microOffset[1]),
-            cell.z * 5 + Number(microOffset[2])
+            cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+            cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+            cell.z * MICRO_DIVISIONS + Number(microOffset[2])
           ],
           options,
           actor: { source: 'script' }
@@ -251,9 +251,9 @@ export class ContraptionManager {
           domain: ActionDomain.WORLD,
           action: 'remove-micro',
           micro: [
-            cell.x * 5 + Number(microOffset[0]),
-            cell.y * 5 + Number(microOffset[1]),
-            cell.z * 5 + Number(microOffset[2])
+            cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+            cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+            cell.z * MICRO_DIVISIONS + Number(microOffset[2])
           ],
           actor: { source: 'script' }
         });
@@ -268,9 +268,9 @@ export class ContraptionManager {
           domain: ActionDomain.WORLD,
           action: 'paint-micro',
           micro: [
-            cell.x * 5 + Number(microOffset[0]),
-            cell.y * 5 + Number(microOffset[1]),
-            cell.z * 5 + Number(microOffset[2])
+            cell.x * MICRO_DIVISIONS + Number(microOffset[0]),
+            cell.y * MICRO_DIVISIONS + Number(microOffset[1]),
+            cell.z * MICRO_DIVISIONS + Number(microOffset[2])
           ],
           options,
           actor: { source: 'script' }
@@ -1076,7 +1076,7 @@ export class ContraptionManager {
     if (this.sound) this.sound.playWrenchClick();
   }
 
-  /** Convert a world point to the inclusive micro cell (0.2 m grid) under it. */
+  /** Convert a world point to the inclusive micro cell (0.125 m grid) under it. */
   microCellFromPoint(pos) {
     return {
       x: wrapMicroX(Math.floor(pos.x * MICRO_DIVISIONS + 1e-6)),
@@ -1381,7 +1381,7 @@ export class ContraptionManager {
   }
 
   /**
-   * Toggle one 0.2 m micro cell in the world micro-selection (the Selector
+   * Toggle one 0.125 m micro cell in the world micro-selection (the Selector
    * tool's Tab-toggled micro mode). Mirrors toggleWorldGlueCell: shift always
    * enters single mode, and any unfinished or completed box is discarded.
    */
@@ -1691,7 +1691,7 @@ export class ContraptionManager {
 
     if (this.microSelection !== null) {
       // Sparse micro selection (Selector micro mode): extract exactly the
-      // existing micro voxels at the selected 0.2 m cells.
+      // existing micro voxels at the selected 0.125 m cells.
       const cells = this.microSelection;
       let minMx = Infinity, minMy = Infinity, minMz = Infinity;
       for (const c of cells) {
@@ -1732,7 +1732,7 @@ export class ContraptionManager {
             localX: micro.mx / MICRO_DIVISIONS - minMx / MICRO_DIVISIONS,
             localY: micro.my / MICRO_DIVISIONS - minMy / MICRO_DIVISIONS,
             localZ: micro.mz / MICRO_DIVISIONS - minMz / MICRO_DIVISIONS,
-            size: 0.2,
+            size: MICRO_SIZE,
             block: BlockTypes.COLOR_BLOCK,
             color: micro.color,
             part: micro.part
@@ -1774,10 +1774,10 @@ export class ContraptionManager {
         const microBlocks = this.world.extractMicroRegion(b.x, b.y, b.z, b.x, b.y, b.z);
         for (const micro of microBlocks) {
           rawBlocks.push({
-            localX: micro.mx / 5 - bounds.minX,
-            localY: micro.my / 5 - bounds.minY,
-            localZ: micro.mz / 5 - bounds.minZ,
-            size: 0.2,
+            localX: micro.mx / MICRO_DIVISIONS - bounds.minX,
+            localY: micro.my / MICRO_DIVISIONS - bounds.minY,
+            localZ: micro.mz / MICRO_DIVISIONS - bounds.minZ,
+            size: MICRO_SIZE,
             block: BlockTypes.COLOR_BLOCK,
             color: micro.color,
             part: micro.part
@@ -1818,10 +1818,10 @@ export class ContraptionManager {
       ) || [];
       for (const micro of microBlocks) {
         rawBlocks.push({
-          localX: micro.mx / 5 - bounds.minX,
-          localY: micro.my / 5 - bounds.minY,
-          localZ: micro.mz / 5 - bounds.minZ,
-          size: 0.2,
+          localX: micro.mx / MICRO_DIVISIONS - bounds.minX,
+          localY: micro.my / MICRO_DIVISIONS - bounds.minY,
+          localZ: micro.mz / MICRO_DIVISIONS - bounds.minZ,
+          size: MICRO_SIZE,
           block: BlockTypes.COLOR_BLOCK,
           color: micro.color,
           part: micro.part
@@ -2019,9 +2019,9 @@ export class ContraptionManager {
       const localP = contraption.getBlockWorldCenter(b);
 
       if (blockSize < 1) {
-        const targetMx = Math.round((localP.x - blockSize / 2) * 5);
-        const targetMy = Math.round((localP.y - blockSize / 2) * 5);
-        const targetMz = Math.round((localP.z - blockSize / 2) * 5);
+        const targetMx = Math.round((localP.x - blockSize / 2) * MICRO_DIVISIONS);
+        const targetMy = Math.round((localP.y - blockSize / 2) * MICRO_DIVISIONS);
+        const targetMz = Math.round((localP.z - blockSize / 2) * MICRO_DIVISIONS);
         // Solidifying intentionally removes recursive entity motion metadata.
         this.world.setMicroBlock(targetMx, targetMy, targetMz, b.color, null);
         continue;

@@ -56,7 +56,7 @@ const ctxEntries: ApiEntry[] = [
   { signature: 'ctx.blocks', type: 'object', description: "Block-edit snapshot: `pressed(type?)` and `event()`; types are `'place'|'remove'|'color'|'subdivide'`." },
   { signature: 'ctx.players', type: 'array', description: 'Frozen player observations. `position` remains the eye-position compatibility alias; records also expose `eyePosition`, nullable `feetPosition`/`velocity`/pose and movement flags, riding IDs, `isLocal`, and fixed 50 kg mass.' },
   { signature: 'ctx.driver', type: 'object|null', description: 'Current local driver for this entity as `{playerId,componentId,seatIndex}`, or `null` when it is not mounted.' },
-  { signature: 'ctx.contacts', type: 'array', description: 'Up to 32 frozen contacts observed since the previous submitted script frame. Kinds are `terrain|entity|player`; records include component IDs, point, normal, relative velocity, penetration, and impulse when available.' },
+  { signature: 'ctx.contacts', type: 'array', description: 'Up to 32 frozen contacts observed since the previous submitted script frame. Kinds are `terrain|entity|player`; records include component IDs, point, normal, relative velocity, penetration, and impulse when available. Resting support contacts retained during physics sleep have `sleeping: true` and zero impulse/relative velocity.' },
   { signature: 'ctx.world', type: 'object', description: 'World query and mutation API described below.' },
   { signature: 'ctx.selection', type: 'object', description: 'Shared engine selection command API described below.' },
   { signature: 'ctx.commands', type: 'object', description: 'Final main-thread command results from the previous submitted frame: `get(commandId)` and `all()`.' },
@@ -86,10 +86,10 @@ const selfUniversalEntries: ApiEntry[] = [
   { signature: 'self.voxels.clear(position)', description: 'Queue removal of one standard voxel; returns `{ok,removed,reason}`.' },
   { signature: 'self.voxels.paint(position, options?)', description: 'Queue repainting one standard voxel; returns `{ok,painted,reason}`.' },
   { signature: 'self.voxels.clearCell(position)', description: 'Queue removal of all standard and micro voxels in one 1 m component cell.' },
-  { signature: 'self.voxels.subdivide(position, clearOffset?)', description: 'Queue conversion to 125 micro voxels, optionally removing one offset atomically.' },
-  { signature: 'self.microVoxels.set(cell, offset, options?)', description: 'Queue a 0.2 m voxel; each offset coordinate is an integer from 0 through 4.' },
-  { signature: 'self.microVoxels.clear(cell, offset)', description: 'Queue removal of one exact 0.2 m component voxel.' },
-  { signature: 'self.microVoxels.paint(cell, offset, options?)', description: 'Queue repainting one exact 0.2 m component voxel.' }
+  { signature: 'self.voxels.subdivide(position, clearOffset?)', description: 'Queue conversion to 512 micro voxels, optionally removing one offset atomically.' },
+  { signature: 'self.microVoxels.set(cell, offset, options?)', description: 'Queue a 0.125 m voxel; each offset coordinate is an integer from 0 through 7.' },
+  { signature: 'self.microVoxels.clear(cell, offset)', description: 'Queue removal of one exact 0.125 m component voxel.' },
+  { signature: 'self.microVoxels.paint(cell, offset, options?)', description: 'Queue repainting one exact 0.125 m component voxel.' }
 ];
 
 const kinematicEntries: ApiEntry[] = [
@@ -125,10 +125,10 @@ const worldEntries: ApiEntry[] = [
   { signature: 'ctx.world.voxels.clear(position)', description: 'Queue removal of one standard voxel without deleting micro voxels in its cell.' },
   { signature: 'ctx.world.voxels.paint(position, options?)', description: 'Queue repainting one existing standard voxel.' },
   { signature: 'ctx.world.voxels.clearCell(position)', description: 'Queue removal of all standard and micro voxels in one world cell.' },
-  { signature: 'ctx.world.voxels.subdivide(position, clearOffset?)', description: 'Queue conversion of one standard voxel to 125 micro voxels.' },
-  { signature: 'ctx.world.microVoxels.get(cell, offset)', description: 'Read one real 0.2 m world voxel as `{block,color}` plus the current tick overlay; offset coordinates are integers from 0 through 4.' },
-  { signature: 'ctx.world.microVoxels.set(cell, offset, options?)', description: 'Queue one 0.2 m world voxel placement.' },
-  { signature: 'ctx.world.microVoxels.clear(cell, offset)', description: 'Queue removal of one exact 0.2 m world voxel.' },
+  { signature: 'ctx.world.voxels.subdivide(position, clearOffset?)', description: 'Queue conversion of one standard voxel to 512 micro voxels.' },
+  { signature: 'ctx.world.microVoxels.get(cell, offset)', description: 'Read one real 0.125 m world voxel as `{block,color}` plus the current tick overlay; offset coordinates are integers from 0 through 7.' },
+  { signature: 'ctx.world.microVoxels.set(cell, offset, options?)', description: 'Queue one 0.125 m world voxel placement.' },
+  { signature: 'ctx.world.microVoxels.clear(cell, offset)', description: 'Queue removal of one exact 0.125 m world voxel.' },
   { signature: 'ctx.world.microVoxels.paint(cell, offset, options?)', description: 'Queue repainting one existing micro world voxel.' },
   { signature: 'ctx.world.entities(origin, radius=16)', description: "Filter the prefetched 64 m nearby-entity snapshot using shortest wrapped X/Z distance. Descriptors include pose, velocities, mass, bounds, collision/ground state, physics enabled state, script status, and component count." },
   { signature: 'ctx.world.entities.get(id, chunkId?)', description: 'Look up an entity in the frozen nearby snapshot.' },
@@ -142,7 +142,7 @@ const selectionEntries: ApiEntry[] = [
   { signature: 'ctx.selection.clear()', description: 'Queue clearing the shared selection; returns `{ok,cleared,reason}`.' },
   { signature: 'ctx.selection.cornerA(point) / cornerB(point)', description: 'Set progressive world-box corners; accepts `{micro:true}` and returns `{ok,selected,reason}`.' },
   { signature: 'ctx.selection.box(a, b)', description: 'Set an atomic world box; accepts `{micro:true}`.' },
-  { signature: 'ctx.selection.cells(list) / toggle(cell)', description: 'Replace or toggle sparse cells; micro mode uses 0.2 m cells.' },
+  { signature: 'ctx.selection.cells(list) / toggle(cell)', description: 'Replace or toggle sparse cells; micro mode uses 0.125 m cells.' },
   { signature: 'ctx.selection.entity(entityId, nodeId?)', description: 'Select a component subtree. Internal component selection requires a stopped entity.' },
   { signature: 'ctx.selection.entityBox(entityId, nodeId, a, b, space?)', description: 'Select directly owned voxels intersecting a node-local or world-space box; requires stopped.' },
   { signature: 'ctx.selection.delete()', description: 'Delete the shared selection; internal entity edits require stopped. Returns removal counts and IDs.' },

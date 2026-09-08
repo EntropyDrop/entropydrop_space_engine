@@ -734,6 +734,26 @@ export class World {
     );
   }
 
+  getMicroCollisionBoxesInAABB(aabb) {
+    return this.microVoxels.getCollisionBoxesInAABB(aabb, true,
+      (mx, mz) => this.isMicroCollisionReady(mx, mz));
+  }
+
+  /** Only terrain overlapping this body's support/contact neighbourhood can wake it. */
+  getTerrainCollisionStamp(bounds): any[] {
+    const stamp: any[] = [];
+    for (let cx = Math.floor(bounds.minX / CHUNK_SIZE_X); cx <= Math.floor(bounds.maxX / CHUNK_SIZE_X); cx++) {
+      for (let cz = Math.floor(bounds.minZ / CHUNK_SIZE_Z); cz <= Math.floor(bounds.maxZ / CHUNK_SIZE_Z); cz++) {
+        const key = World.getChunkKey(wrapChunkX(cx), wrapChunkZ(cz));
+        const chunk = this.getChunk(cx, cz);
+        stamp.push(key, chunk, chunk?.dataVersion, chunk?.publishedDataVersion,
+          !!chunk?.mesh, this.activeChunkKeys.has(key),
+          ...this.microVoxels.getCollisionStamp(cx, cz));
+      }
+    }
+    return stamp;
+  }
+
   getMicroBlocksInAABB(aabb, collisionReadyOnly = false) {
     const cells = collisionReadyOnly
       ? this.microVoxels.getPublishedCollisionCellsInAABB(aabb)
@@ -792,7 +812,7 @@ export class World {
   }
 
   /**
-   * Exact bent-face raycast for 0.2 m micro voxels.
+   * Exact bent-face raycast for 0.125 m micro voxels.
    */
   raycastMicroBent(originBent, dirBent, maxDistance = 8, usePublishedCollision = true) {
     const result = this.raycastBentVoxelFaces(
@@ -1909,7 +1929,7 @@ export class World {
 
   /**
    * Remove and return microcells inside an inclusive integer micro-index box.
-   * Unlike extractMicroRegion the bounds are 0.2 m grid coordinates, so a
+   * Unlike extractMicroRegion the bounds are 0.125 m grid coordinates, so a
    * single cell is addressed by equal min/max values without float artifacts.
    */
   extractMicroCellRegion(minMx, minMy, minMz, maxMx, maxMy, maxMz) {

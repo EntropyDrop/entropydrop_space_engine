@@ -13,13 +13,13 @@ test('standard voxels retain arbitrary per-instance colors', () => {
   assert.equal(world.getBlockColor(2, 20, 2), 0x12abef);
 });
 
-test('spoon subdivision replaces one standard voxel with exactly 5x5x5 cells', () => {
+test('spoon subdivision replaces one standard voxel with exactly 8x8x8 cells', () => {
   const world = new World(new THREE.Scene()) as any;
   world.setBlock(2, 20, 2, BlockTypes.COLOR_BLOCK, false, 0xff3366);
-  assert.equal(world.subdivideBlock(2, 20, 2), 125);
+  assert.equal(world.subdivideBlock(2, 20, 2), 512);
   assert.equal(world.getBlock(2, 20, 2), BlockTypes.AIR);
-  assert.equal(world.microVoxels.cells.size, 125);
-  assert.equal(world.microVoxels.get(10, 100, 10), 0xff3366);
+  assert.equal(world.microVoxels.cells.size, 512);
+  assert.equal(world.microVoxels.get(16, 160, 16), 0xff3366);
   world.microVoxels.updateMesh();
 
   const hit = world.raycastMicro(
@@ -37,13 +37,13 @@ test('spoon subdivision replaces one standard voxel with exactly 5x5x5 cells', (
     4
   );
   assert.equal(axisHit.hit, true);
-  assert.equal(axisHit.microPos.x, 10);
+  assert.equal(axisHit.microPos.x, 16);
 });
 
 test('micro voxel edits rebuild only their dirty horizontal mesh chunk', () => {
   const layer = new MicroVoxelLayer() as any;
   layer.set(1, 10, 1, 0xff0000);
-  layer.set(101, 10, 1, 0x00ff00);
+  layer.set(161, 10, 1, 0x00ff00);
   assert.equal(layer.updateMesh(), true);
   assert.equal(layer.meshChunks.size, 2);
 
@@ -60,7 +60,7 @@ test('micro voxel edits rebuild only their dirty horizontal mesh chunk', () => {
 
 test('micro voxel meshes use compact indexed attributes and metre-correct transforms', () => {
   const layer = new MicroVoxelLayer();
-  layer.set(81, 10, 1, 0x48dbfb);
+  layer.set(129, 10, 1, 0x48dbfb);
   layer.updateMesh();
 
   const mesh = layer.meshChunks.get('4,0')!;
@@ -120,7 +120,7 @@ test('dense micro mesh rebuilds yield to the render-frame budget and retain the 
 test('micro mesh work is deferred until its standard chunk is active', () => {
   const layer = new MicroVoxelLayer();
   layer.set(1, 10, 1, 0xff0000);
-  layer.set(81, 10, 1, 0x00ff00);
+  layer.set(129, 10, 1, 0x00ff00);
 
   assert.equal(layer.updateMesh(1, new Set(['0,0'])), true);
   assert.equal(layer.meshChunks.has('0,0'), true);
@@ -133,8 +133,8 @@ test('micro mesh work is deferred until its standard chunk is active', () => {
 test('interactive micro edits are selected before ordinary queued mesh partitions', () => {
   const layer = new MicroVoxelLayer();
   layer.set(1, 10, 1, 0xff0000);
-  layer.set(101, 10, 1, 0x00ff00);
-  layer.prioritizeMeshAt(101, 1);
+  layer.set(161, 10, 1, 0x00ff00);
+  layer.prioritizeMeshAt(161, 1);
 
   assert.equal(
     layer.updateMesh(1, new Set(['0,0', '1,0'])),
@@ -156,8 +156,8 @@ test('interactive micro edits preempt an already active background mesh build', 
   assert.equal(layer.activeMeshBuild?.chunkKey, '0,0',
     'the ordinary partition should be paused mid-build');
 
-  layer.set(101, 10, 1, 0x00ff00);
-  layer.prioritizeMeshAt(101, 1);
+  layer.set(161, 10, 1, 0x00ff00);
+  layer.prioritizeMeshAt(161, 1);
   assert.equal(layer.activeMeshBuild, null,
     'direct input should return unrelated active work to the queue');
 
@@ -193,8 +193,8 @@ test('world publishes local micro placement and destruction before idle streamin
 
 test('micro mesh chunks cull shared faces across their boundary', () => {
   const layer = new MicroVoxelLayer();
-  layer.set(19, 10, 1, 0xff0000);
-  layer.set(20, 10, 1, 0xff0000);
+  layer.set(31, 10, 1, 0xff0000);
+  layer.set(32, 10, 1, 0xff0000);
   layer.updateMesh();
 
   assert.equal(layer.meshChunks.get('0,0')?.geometry.index?.count, 30);
@@ -204,11 +204,11 @@ test('micro mesh chunks cull shared faces across their boundary', () => {
 test('micro voxel chunk replacement clears only the indexed target chunk', () => {
   const layer = new MicroVoxelLayer();
   layer.set(1, 10, 1, 0xff0000);
-  layer.set(81, 10, 1, 0x00ff00);
+  layer.set(129, 10, 1, 0x00ff00);
 
   assert.equal(layer.clearChunk(0, 0), 1);
   assert.equal(layer.get(1, 10, 1), null);
-  assert.equal(layer.get(81, 10, 1), 0x00ff00);
+  assert.equal(layer.get(129, 10, 1), 0x00ff00);
 });
 
 test('dense micro voxel chunk clearing is resumable', () => {
@@ -268,7 +268,7 @@ test('cross-layer conversion can prepare a micro mesh without publishing it earl
 test('a cross-layer barrier also defers the adjacent boundary-face partition', () => {
   const layer = new MicroVoxelLayer();
   const deferredChunks = new Set(['0,0']);
-  layer.set(79, 100, 5, 0x48dbfb);
+  layer.set(127, 100, 5, 0x48dbfb);
   layer.updateMesh(Infinity, new Set(['0,0', '1,0']), null, Infinity, deferredChunks);
 
   assert.equal(layer.meshChunks.size, 0,
@@ -288,12 +288,12 @@ test('a cross-layer barrier also defers the adjacent boundary-face partition', (
 test('a newer inactive boundary companion cannot hold the target barrier', () => {
   const layer = new MicroVoxelLayer();
   const deferredChunks = new Set(['0,0']);
-  layer.set(79, 100, 5, 0x48dbfb);
+  layer.set(127, 100, 5, 0x48dbfb);
   layer.updateMesh(Infinity, new Set(['0,0', '1,0']), null, Infinity, deferredChunks);
 
   // This is inside the blocked outside companion partition, but not on its
   // shared edge, so only that inactive partition receives a newer revision.
-  layer.set(81, 100, 5, 0x22c55e);
+  layer.set(129, 100, 5, 0x22c55e);
   assert.equal(layer.isDeferredPublicationReady('0,0', new Set(['0,0'])), true,
     'an inactive stale companion must not hold the active standard result forever');
   assert.equal(layer.publishDeferredForStandardChunk('0,0', () => {}), 1,
@@ -303,8 +303,8 @@ test('a newer inactive boundary companion cannot hold the target barrier', () =>
 test('adjacent cross-layer barriers retain unique micro partition ownership', () => {
   const layer = new MicroVoxelLayer();
   const deferredChunks = new Set(['0,0', '1,0']);
-  layer.set(79, 100, 5, 0x48dbfb);
-  layer.set(80, 100, 5, 0x22c55e);
+  layer.set(127, 100, 5, 0x48dbfb);
+  layer.set(128, 100, 5, 0x22c55e);
   layer.updateMesh(Infinity, new Set(['0,0', '1,0']), null, Infinity, deferredChunks);
 
   assert.equal(layer.isDeferredPublicationReady('0,0'), true);
@@ -327,13 +327,13 @@ test('selected micro voxels become one programmable rigid body and can be restor
   const contraption = manager.assembleSelection() as any;
 
   assert.ok(contraption);
-  assert.equal(contraption.blocks.length, 125);
+  assert.equal(contraption.blocks.length, 512);
   assert.ok(contraption.blocks.every(block => block.size === MICRO_SIZE));
   assert.ok(Math.abs(contraption.voxelVolume - 1) < 1e-9);
   assert.equal(world.microVoxels.cells.size, 0);
 
   assert.equal(manager.disassembleContraption(contraption), true);
-  assert.equal(world.microVoxels.cells.size, 125);
+  assert.equal(world.microVoxels.cells.size, 512);
 });
 
 test('standard entities solidify without losing blocks above the legacy y=32 boundary', () => {

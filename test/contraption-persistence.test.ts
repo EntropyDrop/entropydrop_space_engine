@@ -38,7 +38,7 @@ test('offline entity persistence rejects the obsolete v2 frontend shape', () => 
   const manager = new ContraptionManager(new THREE.Scene(), null, null, null, storage);
   manager.setWorldId(worldId);
 
-  assert.equal(ENTITY_STORAGE_VERSION, 3);
+  assert.equal(ENTITY_STORAGE_VERSION, 4);
   assert.equal(manager.loadEntitiesFromStorage(), 0);
   assert.equal(manager.contraptions.length, 0);
 });
@@ -125,7 +125,7 @@ test('contraption manager saves assembled entity and restores it after simulated
     mode: ContraptionMode.PROGRAMMABLE,
     blocks: [
       { localX: 0, localY: 0, localZ: 0, size: 1, color: 0xff0000, block: BlockTypes.COLOR_BLOCK, entityId: 'root' },
-      { localX: 1, localY: 0, localZ: 0, size: 0.2, color: 0x00ff00, block: BlockTypes.COLOR_BLOCK, entityId: 'root' }
+      { localX: 1, localY: 0, localZ: 0, size: 0.125, color: 0x00ff00, block: BlockTypes.COLOR_BLOCK, entityId: 'root' }
     ],
     childEntities: [],
     scripts: [{ id: 'root', code: 'self.color = 0x123456;' }],

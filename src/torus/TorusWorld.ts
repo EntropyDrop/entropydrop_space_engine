@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroGrid.ts';
 // =============================================================================
 // TorusWorld — toroidal world geometry.
 //
@@ -104,11 +105,11 @@ export function wrapChunkZ(cz) {
   return ((cz % TORUS_CHUNKS_Z) + TORUS_CHUNKS_Z) % TORUS_CHUNKS_Z;
 }
 export function wrapMicroX(mx) {
-  const m = TORUS_SIZE_X * 5;
+  const m = TORUS_SIZE_X * MICRO_DIVISIONS;
   return ((mx % m) + m) % m;
 }
 export function wrapMicroZ(mz) {
-  const m = TORUS_SIZE_Z * 5;
+  const m = TORUS_SIZE_Z * MICRO_DIVISIONS;
   return ((mz % m) + m) % m;
 }
 
@@ -471,7 +472,7 @@ vec3 torusObjectNormal = objectNormal;
 	#endif
 	torusWp = modelMatrix * vec4(
 		surfaceOffset.x + torusSurfaceCenterOffset.x,
-		surfaceHeight * 0.2,
+		surfaceHeight * ${MICRO_SIZE},
 		surfaceOffset.y + torusSurfaceCenterOffset.y,
 		1.0
 	);

@@ -243,7 +243,7 @@ test('terrain collision sweeps across a standard wall during a stalled frame', (
   }
 });
 
-test('terrain collision sweeps across a 0.2m micro wall', () => {
+test('terrain collision sweeps across a 0.125m micro wall', () => {
   const wallX = 12;
   const wallMicroX = wallX * 5;
   const wallWorld = {

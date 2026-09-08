@@ -520,14 +520,14 @@ test('shovel and spoon can directly modify running entities and append blocks to
   const blockIdx = contraption.blocks.findIndex(b => b.localX === 2 && b.localY === 0 && b.localZ === 1);
   const oldBlock = contraption.blocks[blockIdx];
   contraption.blocks.splice(blockIdx, 1);
-  for (let ix = 0; ix < 5; ix++) {
-    for (let iy = 0; iy < 5; iy++) {
-      for (let iz = 0; iz < 5; iz++) {
+  for (let ix = 0; ix < 8; ix++) {
+    for (let iy = 0; iy < 8; iy++) {
+      for (let iz = 0; iz < 8; iz++) {
         contraption.blocks.push({
-          localX: 2 + ix * 0.2,
-          localY: 0 + iy * 0.2,
-          localZ: 1 + iz * 0.2,
-          size: 0.2,
+          localX: 2 + ix * 0.125,
+          localY: 0 + iy * 0.125,
+          localZ: 1 + iz * 0.125,
+          size: 0.125,
           color: oldBlock.color,
           block: BlockTypes.COLOR_BLOCK,
           entityId: oldBlock.entityId
@@ -537,9 +537,9 @@ test('shovel and spoon can directly modify running entities and append blocks to
   }
   contraption.rebuildAfterBlockChange();
 
-  // Verify all 125 micro blocks belong to spinner
+  // Verify all 512 micro blocks belong to spinner
   const spinnerBlocks = contraption.blocks.filter(b => b.entityId === 'spinner');
-  assert.equal(spinnerBlocks.length, 126); // 1 standard + 125 micro
+  assert.equal(spinnerBlocks.length, 513); // 1 standard + 512 micro
 
   // 4. Raycast micro block on child component
   const microHit = contraption.raycastCollisionCells(
@@ -1024,8 +1024,8 @@ test('V2 component voxel namespaces separate standard/micro edits and return str
   const microPlaced = arm.microVoxels.set([2, 0, 0], [1, 1, 1], { r: 0, g: 255, b: 0 });
   assert.deepEqual(microPlaced, { ok: true, placed: 1, reason: 'placed' });
   assert.ok(contraption.blocks.some(block =>
-    block.entityId === 'arm' && (block.size || 1) === 0.2
-    && block.localX === 4.2 && block.localY === 0.2 && block.localZ === 0.2
+    block.entityId === 'arm' && (block.size || 1) === 0.125
+    && block.localX === 4.125 && block.localY === 0.125 && block.localZ === 0.125
     && block.color === 0x00ff00
   ));
 
@@ -1188,16 +1188,16 @@ test('world API supports color reads, raycast metadata, nearby entities, and bui
   assert.equal(info.color, 0x3366ff, 'color should be readable');
   assert.equal(api.voxels.get([8, 1, 8]).block, BlockTypes.AIR, 'air should be reported');
 
-  // The micro namespace reads exact 0.2-unit cells.
+  // The micro namespace reads exact 0.125-unit cells.
   world.setBlock(9, 0, 0, BlockTypes.AIR, true); // Clear generated terrain.
-  world.setMicroBlock(9 * 5 + 1, 1, 1, 0xabcdef); // Microcell (1,1,1) in cell 9.
+  world.setMicroBlock(9 * 8 + 1, 1, 1, 0xabcdef); // Microcell (1,1,1) in cell 9.
   const micro = api.microVoxels.get([9, 0, 0], [1, 1, 1]);
   assert.equal(micro.block, 1, 'microblock should exist');
   assert.equal(micro.color, 0xabcdef, 'microblock color should match');
   assert.equal('size' in micro, false, 'result should contain no extra size field');
   assert.equal(api.microVoxels.get([9, 0, 0], [2, 1, 1]).block, 0, 'an empty microcell should report air');
 
-  const microHit = api.raycast([8.5, 0.3, 0.3], [1, 0, 0], {
+  const microHit = api.raycast([8.5, 0.1875, 0.1875], [1, 0, 0], {
     maxDistance: 2,
     include: 'world',
     voxelKinds: ['micro']
@@ -1324,7 +1324,7 @@ test('ctx.world uses separate standard and micro voxel read namespaces', () => {
 
   // Place a microblock using an integer microcell index.
   world.setBlock(3, 0, 0, BlockTypes.AIR, true); // Clear generated terrain.
-  world.setMicroBlock(3 * 5 + 1, 1, 1, 0xabcdef); // Microcell (1,1,1) in cell 3.
+  world.setMicroBlock(3 * 8 + 1, 1, 1, 0xabcdef); // Microcell (1,1,1) in cell 3.
 
   const micro = api.microVoxels.get([3, 0, 0], [1, 1, 1]);
   assert.equal(micro.block, 1, 'microblock should exist');
