@@ -82,6 +82,7 @@ export class ContraptionManager {
   declare gluePoints: any[];
   declare connectedSelection: any;
   declare microSelection: any;
+  declare microBounds: any;
   declare childSelection: any;
   declare activeDrivable: any;
   declare activeProgrammingContraption: any;
@@ -119,6 +120,7 @@ export class ContraptionManager {
     this.gluePoints = []; // World Super Glue box mode: three points.
     this.connectedSelection = null; // World single mode: explicit cells, or null in box mode.
     this.microSelection = null; // World micro single mode: explicit 0.125 m cells, or null in standard mode.
+    this.microBounds = null; // Bounding box for confirmed micro selection.
     this.childSelection = null; // { contraption, parentId, mode, points, cells }
     this.entitySelection = null; // Shared entity subtree/block selection used by mouse and scripts.
     this.selectionHost = null; // Player-side selector state invalidated by shared runtime actions.
@@ -1072,6 +1074,7 @@ export class ContraptionManager {
     this.selectionCornerB = null;
     this.connectedSelection = null;
     this.microSelection = null;
+    this.microBounds = null;
     this.gluePoints = [];
     if (this.sound) this.sound.playWrenchClick();
   }
@@ -1169,6 +1172,7 @@ export class ContraptionManager {
       this.selectionCornerB = null;
       this.connectedSelection = null;
       this.microSelection = this.materializeMicroBox(minMx, minMy, minMz, maxMx, maxMy, maxMz);
+      this.microBounds = { minX: minMx, minY: minMy, minZ: minMz, maxX: maxMx, maxY: maxMy, maxZ: maxMz };
       this.gluePoints = [];
       if (this.sound) this.sound.playWrenchClick();
       return { clamped, materialized: this.microSelection.length };
@@ -1191,6 +1195,7 @@ export class ContraptionManager {
     this.selectionCornerB = pos;
     this.connectedSelection = null;
     this.microSelection = null;
+    this.microBounds = null;
     this.gluePoints = [];
     if (this.sound) this.sound.playWrenchClick();
     return { clamped };
@@ -1433,7 +1438,10 @@ export class ContraptionManager {
   }
 
   /** Inclusive micro-index bounds of the sparse micro selection, or null. */
-  getMicroSelectionBounds() {
+  getMicroSelectionBounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null {
+    if (this.microBounds) {
+      return { ...this.microBounds };
+    }
     if (this.microSelection === null || this.microSelection.length === 0) return null;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -1495,6 +1503,7 @@ export class ContraptionManager {
     this.selectionCornerB = null;
     this.connectedSelection = null;
     this.microSelection = null;
+    this.microBounds = null;
     this.gluePoints = [];
     if (Array.isArray(this.contraptions)) {
       for (const contraption of this.contraptions) {
@@ -1656,6 +1665,133 @@ export class ContraptionManager {
     const bounds = this.getSelectionBounds();
     if (!bounds) return 0;
     return (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1) * (bounds.maxZ - bounds.minZ + 1);
+  }
+
+  /**
+   * Expand or shrink the active selection boundary along an axis.
+   * @param axis 'x' | 'y' | 'z'
+   * @param direction 1 (+axis) | -1 (-axis)
+   * @param deltaSteps Number of steps (positive = expand outward, negative = shrink inward)
+   * @param isMicro Whether currently in micro mode
+   * @returns {{ ok: boolean, bounds?: any, isMicro?: boolean, count?: number }}
+   */
+  expandSelectionAxis(axis: 'x' | 'y' | 'z', direction: 1 | -1, deltaSteps: number, isMicro = false) {
+    if (!deltaSteps || !Number.isFinite(deltaSteps)) return { ok: false };
+
+    if (isMicro || this.microBounds || Array.isArray(this.microSelection)) {
+      const mb = this.getMicroSelectionBounds();
+      if (!mb) return { ok: false };
+      let { minX, minY, minZ, maxX, maxY, maxZ } = mb;
+
+      const d = Math.round(deltaSteps);
+      if (axis === 'x') {
+        if (direction === 1) maxX += d;
+        else minX -= d;
+      } else if (axis === 'y') {
+        if (direction === 1) maxY += d;
+        else minY -= d;
+      } else if (axis === 'z') {
+        if (direction === 1) maxZ += d;
+        else minZ -= d;
+      }
+
+      if (maxX < minX) {
+        if (direction === 1) maxX = minX;
+        else minX = maxX;
+      }
+      if (maxY < minY) {
+        if (direction === 1) maxY = minY;
+        else minY = maxY;
+      }
+      if (maxZ < minZ) {
+        if (direction === 1) maxZ = minZ;
+        else minZ = maxZ;
+      }
+
+      const maxMicroSpan = MAX_ENTITY_BOUNDS * MICRO_DIVISIONS;
+      if (maxX - minX + 1 > maxMicroSpan) {
+        if (direction === 1) maxX = minX + maxMicroSpan - 1;
+        else minX = maxX - (maxMicroSpan - 1);
+      }
+      if (maxY - minY + 1 > maxMicroSpan) {
+        if (direction === 1) maxY = minY + maxMicroSpan - 1;
+        else minY = maxY - (maxMicroSpan - 1);
+      }
+      if (maxZ - minZ + 1 > maxMicroSpan) {
+        if (direction === 1) maxZ = minZ + maxMicroSpan - 1;
+        else minZ = maxZ - (maxMicroSpan - 1);
+      }
+
+      minY = Math.max(0, minY);
+      maxY = Math.min(CHUNK_SIZE_Y * MICRO_DIVISIONS - 1, maxY);
+
+      this.microBounds = { minX, minY, minZ, maxX, maxY, maxZ };
+      this.microSelection = this.materializeMicroBox(minX, minY, minZ, maxX, maxY, maxZ);
+      return {
+        ok: true,
+        bounds: { ...this.microBounds },
+        isMicro: true,
+        count: this.microSelection.length
+      };
+    }
+
+    const bounds = this.getSelectionBounds();
+    if (!bounds || this.selectionCornerA === null || this.selectionCornerB === null) {
+      return { ok: false };
+    }
+
+    let { minX, minY, minZ, maxX, maxY, maxZ } = bounds;
+    const d = Math.round(deltaSteps);
+
+    if (axis === 'x') {
+      if (direction === 1) maxX += d;
+      else minX -= d;
+    } else if (axis === 'y') {
+      if (direction === 1) maxY += d;
+      else minY -= d;
+    } else if (axis === 'z') {
+      if (direction === 1) maxZ += d;
+      else minZ -= d;
+    }
+
+    if (maxX < minX) {
+      if (direction === 1) maxX = minX;
+      else minX = maxX;
+    }
+    if (maxY < minY) {
+      if (direction === 1) maxY = minY;
+      else minY = maxY;
+    }
+    if (maxZ < minZ) {
+      if (direction === 1) maxZ = minZ;
+      else minZ = maxZ;
+    }
+
+    if (maxX - minX + 1 > MAX_ENTITY_BOUNDS) {
+      if (direction === 1) maxX = minX + MAX_ENTITY_BOUNDS - 1;
+      else minX = maxX - (MAX_ENTITY_BOUNDS - 1);
+    }
+    if (maxY - minY + 1 > MAX_ENTITY_BOUNDS) {
+      if (direction === 1) maxY = minY + MAX_ENTITY_BOUNDS - 1;
+      else minY = maxY - (MAX_ENTITY_BOUNDS - 1);
+    }
+    if (maxZ - minZ + 1 > MAX_ENTITY_BOUNDS) {
+      if (direction === 1) maxZ = minZ + MAX_ENTITY_BOUNDS - 1;
+      else minZ = maxZ - (MAX_ENTITY_BOUNDS - 1);
+    }
+
+    minY = Math.max(0, minY);
+    maxY = Math.min(CHUNK_SIZE_Y - 1, maxY);
+
+    this.selectionCornerA = { x: minX, y: minY, z: minZ };
+    this.selectionCornerB = { x: maxX, y: maxY, z: maxZ };
+
+    return {
+      ok: true,
+      bounds: { minX, minY, minZ, maxX, maxY, maxZ },
+      isMicro: false,
+      count: this.getSelectionBlockCount()
+    };
   }
 
   getBoundsFromPoints(points) {
