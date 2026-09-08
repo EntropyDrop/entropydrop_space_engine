@@ -364,6 +364,11 @@ export interface EntityNode {
   previousLocalPosition?: THREE.Vector3;
   previousLocalQuaternion?: THREE.Quaternion;
   bodyType: string;
+  blocks?: Set<any>;
+  volume?: number;
+  weightedCenterSum?: THREE.Vector3;
+  maxRadiusSq?: number;
+  voxelChunks?: Map<string, any>;
 }
 
 export interface EntityRigidBody {
