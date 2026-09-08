@@ -180,6 +180,37 @@ export function bendPoint(x, y, z, out = new THREE.Vector3()) {
     : bendTorusPoint(x, y, z, out);
 }
 
+/** Conservative sphere for every bent vertex/triangle in a flat AABB. The
+ * maximum projection derivative bounds curvature between sampled vertices.
+ * Earth projection cuts are discontinuous, so queries crossing a cut descend
+ * into the spatial tree instead of incorrectly culling either side. */
+export function computeBentBoundsSphere(bounds, out = new THREE.Sphere()) {
+  bendPoint((bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2,
+    (bounds.minZ + bounds.maxZ) / 2, out.center);
+  let scale: number;
+  if (worldShapeMode === 'earth') {
+    const crossesCut = (min, max, anchor, period) => (
+      Math.floor((min - anchor + period / 2) / period)
+      !== Math.floor((max - anchor + period / 2) / period)
+    );
+    if (crossesCut(bounds.minX, bounds.maxX, worldProjectionAnchor.x, TORUS_SIZE_X)
+      || crossesCut(bounds.minZ, bounds.maxZ, worldProjectionAnchor.y, TORUS_SIZE_Z)) {
+      out.radius = Infinity;
+      return out;
+    }
+    scale = Math.max(1, (EARTH_R + bounds.maxY - TORUS_GREF) / EARTH_R);
+  } else {
+    const rho = Math.max(
+      Math.abs(Math.min(TORUS_RHO + bounds.minY - TORUS_GREF, TORUS_MAX_RHO)),
+      Math.abs(Math.min(TORUS_RHO + bounds.maxY - TORUS_GREF, TORUS_MAX_RHO)),
+    );
+    scale = Math.max(1, (TORUS_R + rho) / TORUS_R, rho / TORUS_RHO);
+  }
+  out.radius = Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY,
+    bounds.maxZ - bounds.minZ) * 0.5 * scale + 1e-6;
+  return out;
+}
+
 /** Map bent coordinates back to flat space. The outer solution is unique for ρ ≤ R−1. */
 export function unbendPoint(bx, by, bz, out = new THREE.Vector3()) {
   if (worldShapeMode === 'earth') {

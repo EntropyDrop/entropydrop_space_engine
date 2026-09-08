@@ -99,12 +99,19 @@ export class CollisionBoxIndex<T extends CollisionBounds> {
     this.bounds = this.root;
   }
   query(bounds: CollisionBounds): T[] {
+    return this.queryMatchingBounds(candidate => collisionBoundsOverlap(candidate, bounds));
+  }
+
+  /** Query a local-space tree through conservative transformed bounds. This
+   * keeps a moving entity's authored geometry indexed without rebuilding a
+   * world-space tree for every physics pose or camera ray. */
+  queryMatchingBounds(intersects: (bounds: CollisionBounds) => boolean): T[] {
     const matches: number[] = [];
     const visit = (node: IndexNode) => {
-      if (!collisionBoundsOverlap(node, bounds)) return;
+      if (!intersects(node)) return;
       if (node.indices) {
         for (const index of node.indices) {
-          if (collisionBoundsOverlap(this.boxes[index], bounds)) matches.push(index);
+          if (intersects(this.boxes[index])) matches.push(index);
         }
       } else {
         visit(node.left!);

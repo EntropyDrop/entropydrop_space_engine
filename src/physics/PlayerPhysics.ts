@@ -279,7 +279,6 @@ export class PlayerPhysics {
 
   moveWithCollision(dt) {
     const nearbyContraptions = this.getNearbyContraptions();
-    const collisionBoxes = this.getContraptionCollisionBoxes(nearbyContraptions);
 
     // -----------------------------------------------------------------------
     // 1. Move & Resolve Vertical (Y)
@@ -297,7 +296,8 @@ export class PlayerPhysics {
     // 1b. Contraption collision Y. Only a downward face crossing can count as
     // landing; side penetration is deliberately never resolved by moving up.
     if (!worldVerticalHit) {
-      this.resolveContraptionVerticalSweep(collisionBoxes, dy, previousYAABB);
+      this.resolveContraptionVerticalSweep(this.getContraptionCollisionBoxes(nearbyContraptions,
+        this.sweptBounds(previousYAABB, this.getAABB())), dy, previousYAABB);
     }
 
     // -----------------------------------------------------------------------
@@ -314,7 +314,8 @@ export class PlayerPhysics {
 
     // 2b. Swept cell collision catches a face even when one frame crosses the
     // entire cell, preventing tunnelling at high relative speed.
-    this.resolveContraptionHorizontalSweep(collisionBoxes, 'x', dx, previousXAABB);
+    this.resolveContraptionHorizontalSweep(this.getContraptionCollisionBoxes(nearbyContraptions,
+      this.sweptBounds(previousXAABB, this.getAABB())), 'x', dx, previousXAABB);
 
     // -----------------------------------------------------------------------
     // 3. Move & Resolve Horizontal (Z)
@@ -329,7 +330,8 @@ export class PlayerPhysics {
     this.resolveWorldHorizontalCollision(blocksZ, 'z', dz);
 
     // 3b. Contraption Collision Z
-    this.resolveContraptionHorizontalSweep(collisionBoxes, 'z', dz, previousZAABB);
+    this.resolveContraptionHorizontalSweep(this.getContraptionCollisionBoxes(nearbyContraptions,
+      this.sweptBounds(previousZAABB, this.getAABB())), 'z', dz, previousZAABB);
 
     // Recover from an entity that started the frame overlapping the player.
     // This routine only moves in X/Z, so it cannot become an auto-step system.
@@ -355,11 +357,19 @@ export class PlayerPhysics {
     return nearby;
   }
 
-  getContraptionCollisionBoxes(contraptions = this.getNearbyContraptions()) {
+  private sweptBounds(a, b) {
+    return { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), minZ: Math.min(a.minZ, b.minZ),
+      maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY), maxZ: Math.max(a.maxZ, b.maxZ) };
+  }
+
+  getContraptionCollisionBoxes(contraptions = this.getNearbyContraptions(), bounds = null) {
     const boxes = [];
     for (const contraption of contraptions) {
       if (typeof contraption.getCollisionWorldAABBs !== 'function') continue;
-      boxes.push(...contraption.getCollisionWorldAABBs());
+      const candidates = bounds && typeof contraption.queryCollisionWorldAABBs === 'function'
+        ? contraption.queryCollisionWorldAABBs(bounds)
+        : contraption.getCollisionWorldAABBs();
+      for (const box of candidates) boxes.push(box);
     }
     return boxes;
   }
@@ -616,12 +626,12 @@ export class PlayerPhysics {
   resolveDynamicContraptionOverlaps(contraptions = this.getNearbyContraptions()) {
     if (this.isFlying || contraptions.length === 0) return false;
 
-    const collisionBoxes = this.getContraptionCollisionBoxes(contraptions);
     let moved = false;
 
     for (let iteration = 0; iteration < 6; iteration++) {
       const aabb = this.getAABB();
-      const overlaps = collisionBoxes.filter(box => this.aabbIntersects(aabb, box));
+      const overlaps = this.getContraptionCollisionBoxes(contraptions, aabb)
+        .filter(box => this.aabbIntersects(aabb, box));
       if (overlaps.length === 0) break;
 
       // Standing on a ridden contraption: entity position corrections (terrain

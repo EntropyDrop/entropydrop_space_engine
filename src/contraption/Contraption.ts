@@ -5,6 +5,7 @@ import { BlockTypes, DEFAULT_BLOCK_COLOR } from '../voxel/BlockTypes.ts';
 import { ActionDomain, executeBasicAction } from '../actions/BasicActions.ts';
 import {
   bendPoint,
+  computeBentBoundsSphere,
   TORUS_GREF,
   TORUS_K_PHI,
   TORUS_MAX_RHO,
@@ -19,7 +20,8 @@ import {
   validateEntityScriptSyntax
 } from '../scripting/EntityScriptRuntime.ts';
 import { PLAYER_MASS_KG } from '../physics/PlayerPhysics.ts';
-import { mergeCollisionCells, type CollisionBox } from '../physics/CollisionGeometry.ts';
+import { buildEntityVoxelIndexes, transformVoxelBounds } from '../physics/EntityVoxelIndex.ts';
+import { collisionBoundsOverlap, type CollisionBounds, mergeCollisionCells, type CollisionBox } from '../physics/CollisionGeometry.ts';
 
 // Must match createVoxelMesh(): the GPU bends these exact face vertices before
 // rasterization, so bent-space picking intersects the same two triangles shown
@@ -492,6 +494,8 @@ export class Contraption {
   collisionTerrainBoxes: CollisionBox[];
   collisionCellCount: number;
   collisionPoseVersion: number;
+  private collisionVoxelIndexes: any = null;
+  private pickingVoxelIndexes: any = null;
   collisionWorldAabbCache: { version: number; all?: any[]; surface?: any[]; merged?: any[] } | null;
   collisionSamplePointCache: Map<string, { version: number; points: THREE.Vector3[] }>;
 
@@ -4762,12 +4766,20 @@ export class Contraption {
     ) {
       return this.collisionWorldAabbCache[cacheKey];
     }
-    const boxes = [];
-    const nodeTransforms = new Map();
-
     const entries: any[] = merged ? this.collisionPhysicsBoxes : surfaceOnly
       ? (this.collisionSurfaceEntries || this.collisionEntries)
       : this.collisionEntries;
+    const boxes = this.buildCollisionWorldAABBs(entries);
+    if (this.collisionWorldAabbCache?.version !== this.collisionPoseVersion) {
+      this.collisionWorldAabbCache = { version: this.collisionPoseVersion };
+    }
+    this.collisionWorldAabbCache[cacheKey] = boxes;
+    return boxes;
+  }
+
+  private buildCollisionWorldAABBs(entries) {
+    const boxes = [];
+    const nodeTransforms = new Map();
     for (const cell of entries) {
       if (!this.isNodeCollisionEnabled(cell.entityId)) continue;
       const node = this.entityNodes.get(cell.entityId) || this.entityNodes.get(this.rootComponentId);
@@ -4848,11 +4860,59 @@ export class Contraption {
       });
     }
 
-    if (this.collisionWorldAabbCache?.version !== this.collisionPoseVersion) {
-      this.collisionWorldAabbCache = { version: this.collisionPoseVersion };
-    }
-    this.collisionWorldAabbCache[cacheKey] = boxes;
     return boxes;
+  }
+
+  /** Query only the authored cells intersecting a player's swept bounds. */
+  queryCollisionWorldAABBs(bounds: CollisionBounds) {
+    const matches = this.queryIndexedVoxels(true, (local, node, transformed) => (
+      collisionBoundsOverlap(bounds, transformVoxelBounds(local, node, transformed, true))
+    ));
+    return this.buildCollisionWorldAABBs(matches);
+  }
+
+  private queryIndexedVoxels(collision, intersects) {
+    const field = collision ? 'collisionVoxelIndexes' : 'pickingVoxelIndexes';
+    let cached = this[field];
+    if (cached?.shape !== this.collisionEntries) {
+      cached = this[field] = {
+        shape: this.collisionEntries,
+        indexes: buildEntityVoxelIndexes(collision ? this.collisionEntries : this.blocks,
+          this.rootComponentId, collision),
+      };
+    }
+    const matches = [];
+    const transformed = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
+    for (const [id, index] of cached.indexes) {
+      if (collision && !this.isNodeCollisionEnabled(id)) continue;
+      const node = this.entityNodes.get(id) || this.entityNodes.get(this.rootComponentId);
+      if (!node) continue;
+      node.group.updateWorldMatrix(true, false);
+      matches.push(...index.queryMatchingBounds(bounds => intersects(bounds, node, transformed)));
+    }
+    return matches.sort((a, b) => a.order - b.order).map(match => match.entry);
+  }
+
+  private raycastCandidateBlocks(origin, direction, maxDistance, bent = false) {
+    const ray = new THREE.Ray(origin, direction.clone().normalize());
+    const sphere = new THREE.Sphere();
+    const delta = new THREE.Vector3();
+    const box = new THREE.Box3();
+    const point = new THREE.Vector3();
+    return this.queryIndexedVoxels(false, (local, node, transformed) => {
+      transformVoxelBounds(local, node, transformed);
+      if (bent) {
+        computeBentBoundsSphere(transformed, sphere);
+        if (sphere.radius === Infinity) return true;
+        const distance = delta.copy(sphere.center).sub(origin).dot(ray.direction);
+        return distance >= -sphere.radius && distance <= maxDistance + sphere.radius
+          && ray.distanceSqToPoint(sphere.center) <= sphere.radius * sphere.radius;
+      }
+      box.min.set(transformed.minX, transformed.minY, transformed.minZ);
+      box.max.set(transformed.maxX, transformed.maxY, transformed.maxZ);
+      return box.containsPoint(origin)
+        || (ray.intersectBox(box, point) !== null && origin.distanceToSquared(point) <= maxDistance * maxDistance);
+    });
   }
 
   raycastCollisionCells(rayOrigin, rayDirection, maxDistance = 15) {
@@ -4860,7 +4920,7 @@ export class Contraption {
     let closestDistance = maxDistance;
     const nodeRays = new Map();
 
-    for (const block of this.blocks) {
+    for (const block of this.raycastCandidateBlocks(rayOrigin, rayDirection, maxDistance)) {
       const entityId = block.entityId || this.rootComponentId;
       const node = this.entityNodes.get(entityId) || this.entityNodes.get(this.rootComponentId);
       if (!node) continue;
@@ -4924,7 +4984,7 @@ export class Contraption {
     let closest = null;
     let closestDistance = maxDistance;
 
-    for (const block of this.blocks) {
+    for (const block of this.raycastCandidateBlocks(rayOriginBent, rayDirectionBent, maxDistance, true)) {
       const node = this.entityNodes.get(block.entityId || this.rootComponentId)
         || this.entityNodes.get(this.rootComponentId);
       if (!node) continue;
