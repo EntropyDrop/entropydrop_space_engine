@@ -40,7 +40,7 @@ test('spoon subdivision replaces one standard voxel with exactly 8x8x8 cells', (
   assert.equal(axisHit.microPos.x, 16);
 });
 
-test('micro voxel edits rebuild only their dirty horizontal mesh chunk', () => {
+test('micro voxel edits rebuild only their dirty three-dimensional mesh partition', () => {
   const layer = new MicroVoxelLayer() as any;
   layer.set(1, 10, 1, 0xff0000);
   layer.set(161, 10, 1, 0x00ff00);
@@ -63,7 +63,7 @@ test('micro voxel meshes use compact indexed attributes and metre-correct transf
   layer.set(129, 10, 1, 0x48dbfb);
   layer.updateMesh();
 
-  const mesh = layer.meshChunks.get('4,0')!;
+  const mesh = layer.meshChunks.get('8,0,0')!;
   const geometry = mesh.geometry;
   assert.equal(geometry.getAttribute('position').count, 24);
   assert.equal(geometry.index?.count, 36);
@@ -85,7 +85,7 @@ test('same-color micro voxels merge their coplanar exterior into greedy quads', 
   }
   layer.updateMesh();
 
-  const geometry = layer.meshChunks.get('0,0')!.geometry;
+  const geometry = layer.meshChunks.get('0,0,0')!.geometry;
   assert.equal(geometry.getAttribute('position').count, 24, 'a solid cuboid needs six merged quads');
   assert.equal(geometry.index?.count, 36);
 });
@@ -96,9 +96,9 @@ test('dense micro mesh rebuilds yield to the render-frame budget and retain the 
   layer.updateMesh();
   const previousMesh = layer.mesh;
 
-  for (let mx = 0; mx < 20; mx++) {
-    for (let mz = 0; mz < 20; mz++) {
-      for (let my = 0; my < 100; my++) layer.set(mx, my, mz, 0x48dbfb);
+  for (let mx = 0; mx < 15; mx++) {
+    for (let mz = 0; mz < 15; mz++) {
+      for (let my = 0; my < 15; my++) layer.set(mx, my, mz, 0x48dbfb);
     }
   }
 
@@ -108,7 +108,7 @@ test('dense micro mesh rebuilds yield to the render-frame budget and retain the 
   let complete = false;
   let frames = 0;
   while (!complete && frames < 1_000) {
-    complete = layer.updateMesh(1, null, null, 1);
+    complete = layer.updateMesh(1, null, null, 0.05);
     frames++;
   }
   assert.equal(complete, true);
@@ -123,11 +123,11 @@ test('micro mesh work is deferred until its standard chunk is active', () => {
   layer.set(129, 10, 1, 0x00ff00);
 
   assert.equal(layer.updateMesh(1, new Set(['0,0'])), true);
-  assert.equal(layer.meshChunks.has('0,0'), true);
-  assert.equal(layer.meshChunks.has('4,0'), false);
+  assert.equal(layer.meshChunks.has('0,0,0'), true);
+  assert.equal(layer.meshChunks.has('8,0,0'), false);
 
   assert.equal(layer.updateMesh(1, new Set(['1,0'])), true);
-  assert.equal(layer.meshChunks.has('4,0'), true);
+  assert.equal(layer.meshChunks.has('8,0,0'), true);
 });
 
 test('interactive micro edits are selected before ordinary queued mesh partitions', () => {
@@ -140,9 +140,9 @@ test('interactive micro edits are selected before ordinary queued mesh partition
     layer.updateMesh(1, new Set(['0,0', '1,0'])),
     true,
   );
-  assert.equal(layer.meshChunks.has('5,0'), true,
+  assert.equal(layer.meshChunks.has('10,0,0'), true,
     'the partition touched by direct input should publish first');
-  assert.equal(layer.meshChunks.has('0,0'), false,
+  assert.equal(layer.meshChunks.has('0,0,0'), false,
     'ordinary background work should remain queued for the idle path');
 });
 
@@ -153,7 +153,7 @@ test('interactive micro edits preempt an already active background mesh build', 
   }
 
   assert.equal(layer.updateMesh(1, null, null, 0), false);
-  assert.equal(layer.activeMeshBuild?.chunkKey, '0,0',
+  assert.equal(layer.activeMeshBuild?.chunkKey, '0,0,0',
     'the ordinary partition should be paused mid-build');
 
   layer.set(161, 10, 1, 0x00ff00);
@@ -162,9 +162,9 @@ test('interactive micro edits preempt an already active background mesh build', 
     'direct input should return unrelated active work to the queue');
 
   assert.equal(layer.updateMesh(1), true);
-  assert.equal(layer.meshChunks.has('5,0'), true,
+  assert.equal(layer.meshChunks.has('10,0,0'), true,
     'the clicked partition should publish in the next available slice');
-  assert.equal(layer.meshChunks.has('0,0'), false,
+  assert.equal(layer.meshChunks.has('0,0,0'), false,
     'the preempted background partition should remain resumable');
 });
 
@@ -176,29 +176,29 @@ test('world publishes local micro placement and destruction before idle streamin
   assert.equal(world.setMicroBlock(5, 1_000, 5, 0x48dbfb), true);
   assert.equal(world.microVoxels.meshChunks.size, 0);
   let placementFrames = 0;
-  while (!world.microVoxels.meshChunks.has('0,0') && placementFrames < 8) {
+  while (!world.microVoxels.meshChunks.has('0,0,62') && placementFrames < 8) {
     world.processInteractiveTerrainWork();
     placementFrames++;
   }
-  assert.equal(world.microVoxels.meshChunks.has('0,0'), true,
+  assert.equal(world.microVoxels.meshChunks.has('0,0,62'), true,
     'placing a micro voxel should publish without requestIdleCallback');
   assert.ok(placementFrames < 8,
     'a sparse interactive partition should finish within a few foreground budgets');
 
   assert.equal(world.removeMicroBlock(5, 1_000, 5), true);
   assert.equal(world.processInteractiveTerrainWork(), true);
-  assert.equal(world.microVoxels.meshChunks.has('0,0'), false,
+  assert.equal(world.microVoxels.meshChunks.has('0,0,62'), false,
     'destroying the last micro voxel should retire its mesh without idle time');
 });
 
 test('micro mesh chunks cull shared faces across their boundary', () => {
   const layer = new MicroVoxelLayer();
-  layer.set(31, 10, 1, 0xff0000);
-  layer.set(32, 10, 1, 0xff0000);
+  layer.set(15, 10, 1, 0xff0000);
+  layer.set(16, 10, 1, 0xff0000);
   layer.updateMesh();
 
-  assert.equal(layer.meshChunks.get('0,0')?.geometry.index?.count, 30);
-  assert.equal(layer.meshChunks.get('1,0')?.geometry.index?.count, 30);
+  assert.equal(layer.meshChunks.get('0,0,0')?.geometry.index?.count, 30);
+  assert.equal(layer.meshChunks.get('1,0,0')?.geometry.index?.count, 30);
 });
 
 test('micro voxel chunk replacement clears only the indexed target chunk', () => {

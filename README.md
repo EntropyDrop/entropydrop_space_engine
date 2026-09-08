@@ -99,7 +99,7 @@ Scripts still run every tick while physics sleeps. `ctx.contacts` retains restin
 support observations with `sleeping: true`, zero relative velocity and zero impulse;
 a script force wakes its body in the same update.
 
-Microterrain caches exact merged collision boxes and a BVH per 4 m partition.
+Microterrain caches exact merged collision boxes and a BVH per 2×2×2 m partition (at most 4,096 microcells).
 Geometry merges across colors and labels but never across holes. Live edits invalidate
 the live cache; published colliders remain immutable until the replacement mesh is
 published, including incremental chunk replacement and cross-layer subdivision.

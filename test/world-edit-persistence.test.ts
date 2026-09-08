@@ -514,3 +514,411 @@ test('obsolete browser-local grids are ignored without replay or upload', async 
   assert.deepEqual(sent, []);
   assert.ok(storage.getItem(`space.world-edits.v1.${encodeURIComponent(worldId)}`));
 });
+
+test('a spoon subdivision drains all three durable batches without an ACK pacing gap', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sent: { mutations: any[]; acknowledge: () => void }[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const persistence = new WorldEditPersistence({
+    worldId: 'spoon-subdivision-drain',
+    storage: new MemoryStorage(),
+    saveDelayMs: 75,
+    remote: {
+      chunks: [],
+      async sendBatch(_id, mutations) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>(resolve => {
+          sent.push({ mutations: structuredClone(mutations), acknowledge: resolve });
+        });
+        inFlight--;
+      },
+    },
+  });
+  persistence.recordStandard(1, 80, 1, BlockTypes.AIR, 0xffffff);
+  for (let x = 8; x < 16; x++) {
+    for (let y = 640; y < 648; y++) {
+      for (let z = 8; z < 16; z++) persistence.recordMicro(x, y, z, 0xffffff);
+    }
+  }
+  persistence.removeMicro(8, 640, 8);
+  t.mock.timers.tick(74);
+  await Promise.resolve();
+  assert.equal(sent.length, 0, 'the initial durability/coalescing delay still applies');
+  t.mock.timers.tick(1);
+  await Promise.resolve();
+  assert.equal(sent.length, 1);
+  for (let batch = 0; batch < 3; batch++) {
+    sent[batch].acknowledge();
+    await Promise.resolve();
+    await Promise.resolve();
+    t.mock.timers.tick(0);
+    await Promise.resolve();
+    assert.equal(sent.length, Math.min(3, batch + 2), 'an ACK immediately enables the queued suffix');
+  }
+  assert.deepEqual(sent.map(batch => batch.mutations.length), [256, 256, 2]);
+  assert.equal(maxInFlight, 1);
+  assert.equal(persistence.getSyncStatus().pendingMutations, 0);
+});
+
+test('remote snapshot equality includes pending local intent and canonical cell data', () => {
+  const original = {
+    chunk_x: 0, chunk_z: 0, revision: 1,
+    standard: [[1, 80, 1, 0, 0xffffff]],
+    micro: [[8, 640, 8, 0x123456, 'old'], [9, 640, 8, 0xabcdef]],
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-with-outbox', storage: null,
+    remote: { chunks: [original], async sendBatch() { await new Promise(() => {}); } },
+  });
+  persistence.recordMicro(8, 640, 8, 0x334455, 'new');
+  persistence.removeMicro(9, 640, 8);
+  const sameEffective = persistence.beginRemoteChunkReplacement({ ...original, revision: 2 });
+  assert.equal(persistence.continueRemoteChunkReplacement(sameEffective), true);
+  assert.equal(sameEffective.unchanged, true, 'the echoed snapshot plus pending outbox matches live intent');
+
+  const remoteChange = persistence.beginRemoteChunkReplacement({
+    ...original, revision: 3, standard: [[2, 80, 1, 0, 0xffffff]],
+  });
+  assert.equal(persistence.continueRemoteChunkReplacement(remoteChange), true);
+  assert.equal(remoteChange.unchanged, false, 'equal entry counts do not conceal changed coordinates');
+});
+
+test('snapshot equality detects micro color/part and standard block/color changes', () => {
+  const original = {
+    chunk_x: 0, chunk_z: 0, revision: 1,
+    standard: [[1, 80, 1, 0, 0xffffff]],
+    micro: [[8, 640, 8, 0x123456, 'part']],
+  };
+  for (const replacement of [
+    { ...original, micro: [[8, 640, 8, 0x123457, 'part']] },
+    { ...original, micro: [[8, 640, 8, 0x123456, 'other']] },
+    { ...original, standard: [[1, 80, 1, 0, 0xfffffe]] },
+    { ...original, standard: [[1, 80, 1, 1, 0xffffff]] },
+  ]) {
+    const persistence = new WorldEditPersistence({
+      worldId: 'remote-equality-values', storage: null,
+      remote: { chunks: [original], async sendBatch() {} },
+    });
+    const cursor = persistence.beginRemoteChunkReplacement({ ...replacement, revision: 2 });
+    persistence.continueRemoteChunkReplacement(cursor);
+    assert.equal(cursor.unchanged, false);
+  }
+});
+
+test('large unchanged snapshots spend their comparison work across bounded slices', () => {
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+    micro: Array.from({ length: 3_000 }, (_, index) => [index % 80, Math.floor(index / 80), 0, 0x48dbfb]),
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-bounded', storage: null,
+    remote: { chunks: [chunk], async sendBatch() {} },
+  });
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  for (let slice = 0; slice < 6; slice++) {
+    assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1_000), false);
+  }
+  assert.equal(cursor.microIndex, 3_000, 'installation is complete before the comparison finishes');
+  assert.equal(cursor.unchanged, false, 'equality is not exposed before every cell is checked');
+  assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1_000), false);
+  assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1_000), false);
+  assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1_001), true);
+  assert.equal(cursor.unchanged, true);
+});
+
+test('local edits keep already-compared baseline cells and the target in sync', () => {
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+    micro: [[8, 640, 8, 0x123456], [9, 640, 8, 0xabcdef]],
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-edit-race', storage: null,
+    remote: { chunks: [chunk], async sendBatch() { await new Promise(() => {}); } },
+  });
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  assert.equal(persistence.continueRemoteChunkReplacement(cursor, 5), false);
+  assert.equal(cursor.comparisonStarted, true);
+  persistence.recordMicro(8, 640, 8, 0x112233);
+  assert.equal(persistence.continueRemoteChunkReplacement(cursor, 5), true);
+  assert.equal(cursor.unchanged, true, 'the already-compared first cell received the same local edit on both sides');
+  assert.equal([...persistence.getMicroEditsForChunk(0, 0)][0].color, 0x112233);
+});
+
+test('continuous clicks during cleanup, installation and comparison still recognize an equivalent echo', () => {
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+    micro: Array.from({ length: 128 }, (_, index) => [index, 640, 8, 0xabcdef]),
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-continuous', storage: null,
+    remote: { chunks: [chunk], async sendBatch() { await new Promise(() => {}); } },
+  });
+  const expected = new Map(chunk.micro.map(([x, y, z, color]) => [`${x},${y},${z}`, color]));
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  let complete = false;
+  for (let slice = 0; slice < 300 && !complete; slice++) {
+    if (slice % 2 === 0) {
+      const x = slice % 80;
+      persistence.removeMicro(x, 640, 8, true);
+      expected.delete(`${x},640,8`);
+    } else {
+      const x = 100 + slice % 20;
+      persistence.recordMicro(x, 640, 8, 0x123400 + slice);
+      expected.set(`${x},640,8`, 0x123400 + slice);
+    }
+    complete = persistence.continueRemoteChunkReplacement(cursor, 4);
+  }
+  assert.equal(complete, true, 'comparison makes progress while clicks continue');
+  assert.equal(cursor.unchanged, true);
+  const actual = new Map([...persistence.getMicroEditsForChunk(0, 0)]
+    .map(edit => [`${edit.mx},${edit.my},${edit.mz}`, edit.color]));
+  assert.deepEqual(actual, expected);
+  assert.equal([...persistence.getMicroEdits()].length, actual.size, 'cleanup must not orphan global entries');
+});
+
+test('continuous local clicks cannot conceal an untouched remote edit', () => {
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+    micro: Array.from({ length: 64 }, (_, index) => [index, 640, 8, 0xabcdef]),
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-foreign-change', storage: null,
+    remote: { chunks: [chunk], async sendBatch() { await new Promise(() => {}); } },
+  });
+  const cursor = persistence.beginRemoteChunkReplacement({
+    ...chunk, revision: 2,
+    micro: chunk.micro.map(edit => edit[0] === 63 ? [63, 640, 8, 0xff0000] : edit),
+  });
+  for (let slice = 0; slice < 300 && !cursor.complete; slice++) {
+    persistence.recordMicro(slice % 8, 640, 8, slice);
+    persistence.continueRemoteChunkReplacement(cursor, 4);
+  }
+  assert.equal(cursor.complete, true);
+  assert.equal(cursor.unchanged, false);
+  assert.equal([...persistence.getMicroEditsForChunk(0, 0)].find(edit => edit.mx === 63)?.color, 0xff0000);
+});
+
+test('local standard replacement preserves exclusion and cleanup during a remote comparison', () => {
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+    micro: [[8, 640, 8, 0x123456, 'old'], [9, 640, 8, 0xabcdef], [24, 640, 8, 0x112233]],
+  };
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-standard-write', storage: null,
+    remote: { chunks: [chunk], async sendBatch() { await new Promise(() => {}); } },
+  });
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  persistence.continueRemoteChunkReplacement(cursor, 1);
+  persistence.recordStandard(1, 80, 1, BlockTypes.COLOR_BLOCK, 0xff0000);
+  persistence.removeMicroStandardCell(3, 80, 1, true, true);
+  while (!persistence.continueRemoteChunkReplacement(cursor, 2)) {}
+  assert.equal(cursor.unchanged, true);
+  assert.deepEqual([...persistence.getMicroEdits()], []);
+  assert.deepEqual([...persistence.getMicroEditsForChunk(0, 0)], []);
+  assert.equal([...persistence.getStandardEditsForChunk(0, 0)][0].color, 0xff0000);
+});
+
+test('an initial outbox ACK during replacement preserves authoritative color/deletion and newer clicks', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const duringComparison of [false, true]) {
+    for (const foreignDeletes of [false, true]) {
+      const chunk = {
+        chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+        micro: [[8, 640, 8, 0x123456], [9, 640, 8, 0xabcdef]],
+      };
+      const sends: (() => void)[] = [];
+      const persistence = new WorldEditPersistence({
+        worldId: `remote-equality-ack-race-${duringComparison}-${foreignDeletes}`,
+        storage: new MemoryStorage(), saveDelayMs: 0,
+        remote: {
+          chunks: [chunk],
+          async sendBatch() {
+            await new Promise<void>(resolve => sends.push(resolve));
+            return { chunks: [{ chunk_x: 0, chunk_z: 0, revision: 2 }] };
+          },
+        },
+      });
+      persistence.recordMicro(8, 640, 8, 0x0000ff);
+      t.mock.timers.tick(0);
+      await Promise.resolve();
+      assert.equal(sends.length, 1);
+      const cursor = persistence.beginRemoteChunkReplacement({
+        ...chunk, revision: 3,
+        micro: foreignDeletes
+          ? [[9, 640, 8, 0xabcdef]]
+          : [[8, 640, 8, 0xff0000], [9, 640, 8, 0xabcdef]],
+      });
+      if (duringComparison) {
+        while (!cursor.comparisonStarted) {
+          assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1), false);
+        }
+      }
+      // This click happened after the incoming snapshot was fetched, so it
+      // remains local intent even though the older batch is now acknowledged.
+      persistence.recordMicro(9, 640, 8, 0xffff00);
+      sends[0]();
+      await Promise.resolve();
+      await Promise.resolve();
+      while (!persistence.continueRemoteChunkReplacement(cursor, 2)) {}
+      assert.equal(cursor.unchanged, false, 'an ACK boundary must keep authoritative replacement');
+      const actual = [...persistence.getMicroEditsForChunk(0, 0)];
+      assert.equal(actual.find(edit => edit.mx === 8)?.color, foreignDeletes ? undefined : 0xff0000);
+      assert.equal(actual.find(edit => edit.mx === 9)?.color, 0xffff00);
+    }
+  }
+});
+
+test('ACKs newer than an incoming snapshot preserve committed local colors and deletions', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const duringComparison of [false, true]) {
+    for (const localDeletes of [false, true]) {
+      const chunk = {
+        chunk_x: 0, chunk_z: 0, revision: 1, standard: [],
+        micro: [[8, 640, 8, 0x123456], [9, 640, 8, 0xabcdef]],
+      };
+      const sends: (() => void)[] = [];
+      const persistence = new WorldEditPersistence({
+        worldId: `remote-equality-newer-ack-${duringComparison}-${localDeletes}`,
+        storage: new MemoryStorage(), saveDelayMs: 0,
+        remote: {
+          chunks: [chunk],
+          async sendBatch() {
+            await new Promise<void>(resolve => sends.push(resolve));
+            return { chunks: [{ chunk_x: 0, chunk_z: 0, revision: 3 }] };
+          },
+        },
+      });
+      if (localDeletes) persistence.removeMicro(8, 640, 8);
+      else persistence.recordMicro(8, 640, 8, 0x0000ff);
+      t.mock.timers.tick(0);
+      await Promise.resolve();
+      const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+      if (duringComparison) {
+        while (!cursor.comparisonStarted) {
+          assert.equal(persistence.continueRemoteChunkReplacement(cursor, 1), false);
+        }
+      }
+      persistence.recordMicro(9, 640, 8, 0xffff00);
+      sends[0]();
+      await Promise.resolve();
+      await Promise.resolve();
+      while (!persistence.continueRemoteChunkReplacement(cursor, 2)) {}
+      assert.equal(cursor.unchanged, false, 'ACK boundaries retain the normal publication path');
+      const actual = [...persistence.getMicroEditsForChunk(0, 0)];
+      assert.equal(actual.find(edit => edit.mx === 8)?.color, localDeletes ? undefined : 0x0000ff);
+      assert.equal(actual.find(edit => edit.mx === 9)?.color, 0xffff00);
+    }
+  }
+});
+
+test('each chunk uses its own ACK revision when one batch spans several chunks', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const chunks = [0, 1].map(cx => ({
+    chunk_x: cx, chunk_z: 0, revision: 1, standard: [],
+    micro: [[cx * 128 + 8, 640, 8, 0xff0000]],
+  }));
+  let acknowledge = () => {};
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-per-chunk-ack', storage: new MemoryStorage(), saveDelayMs: 0,
+    remote: {
+      chunks,
+      async sendBatch() {
+        await new Promise<void>(resolve => { acknowledge = resolve; });
+        return { chunks: [
+          { chunk_x: 0, chunk_z: 0, revision: 3 },
+          { chunk_x: 1, chunk_z: 0, revision: 5 },
+        ] };
+      },
+    },
+  });
+  persistence.recordMicro(8, 640, 8, 0x0000ff);
+  persistence.recordMicro(136, 640, 8, 0x0000ff);
+  t.mock.timers.tick(0);
+  await Promise.resolve();
+  const older = persistence.beginRemoteChunkReplacement({ ...chunks[0], revision: 2 });
+  const newer = persistence.beginRemoteChunkReplacement({
+    ...chunks[1], revision: 5, micro: [[136, 640, 8, 0x00ff00]],
+  });
+  acknowledge();
+  await Promise.resolve();
+  await Promise.resolve();
+  persistence.continueRemoteChunkReplacement(older);
+  persistence.continueRemoteChunkReplacement(newer);
+  assert.equal([...persistence.getMicroEditsForChunk(0, 0)][0].color, 0x0000ff);
+  assert.equal([...persistence.getMicroEditsForChunk(1, 0)][0].color, 0x00ff00);
+});
+
+test('preserved ACK batches replay in their original order ahead of newer local intent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [], micro: [[8, 640, 8, 0xff0000]],
+  };
+  const sends: (() => void)[] = [];
+  let revision = 2;
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-ack-order', storage: new MemoryStorage(), saveDelayMs: 0,
+    remote: {
+      chunks: [chunk],
+      async sendBatch() {
+        await new Promise<void>(resolve => sends.push(resolve));
+        return { chunks: [{ chunk_x: 0, chunk_z: 0, revision: ++revision }] };
+      },
+    },
+  });
+  for (let index = 0; index < 256; index++) persistence.recordMicro(8, 640, 8, 0x0000ff);
+  persistence.recordMicro(8, 640, 8, 0x00ff00);
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  for (let index = 0; index < 2; index++) {
+    t.mock.timers.tick(0);
+    await Promise.resolve();
+    assert.equal(sends.length, index + 1);
+    sends[index]();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  persistence.continueRemoteChunkReplacement(cursor);
+  assert.equal([...persistence.getMicroEditsForChunk(0, 0)][0].color, 0x00ff00);
+});
+
+test('a split batch preserves only its committed prefix when its suffix is rejected', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const chunk = {
+    chunk_x: 0, chunk_z: 0, revision: 1, standard: [], micro: [[8, 640, 8, 0xff0000]],
+  };
+  const sends: { resolve: (result: unknown) => void; reject: (error: unknown) => void }[] = [];
+  const persistence = new WorldEditPersistence({
+    worldId: 'remote-equality-split-ack', storage: new MemoryStorage(), saveDelayMs: 0,
+    remote: {
+      chunks: [chunk],
+      async sendBatch(_id, mutations) {
+        if (mutations.length > 2) throw Object.assign(new Error('size'), { code: 'TERRAIN_EVENT_TOO_LARGE' });
+        return new Promise((resolve, reject) => sends.push({ resolve, reject }));
+      },
+    },
+  });
+  for (const color of [0x0000ff, 0x0000ff, 0x00ff00, 0x00ff00]) {
+    persistence.recordMicro(8, 640, 8, color);
+  }
+  const cursor = persistence.beginRemoteChunkReplacement({ ...chunk, revision: 2 });
+  for (let tick = 0; sends.length < 1 && tick < 10; tick++) {
+    t.mock.timers.tick(0);
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  assert.equal(sends.length, 1);
+  sends[0].resolve({ chunks: [{ chunk_x: 0, chunk_z: 0, revision: 3 }] });
+  for (let tick = 0; sends.length < 2 && tick < 10; tick++) {
+    t.mock.timers.tick(0);
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  assert.equal(sends.length, 2);
+  sends[1].reject(Object.assign(new Error('rejected'), { permanent: true }));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  persistence.continueRemoteChunkReplacement(cursor);
+  assert.equal([...persistence.getMicroEditsForChunk(0, 0)][0].color, 0x0000ff);
+});

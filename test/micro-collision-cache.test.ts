@@ -123,3 +123,79 @@ test('a body rests on merged published microterrain, sleeps, and falls when it i
   assert.equal(physics.isSleeping(body), false);
   assert.ok(body.position.y < height);
 });
+
+test('color, part labels and adjacent visible faces retain cached collision geometry', () => {
+  const layer = new MicroVoxelLayer();
+  layer.set(15, 15, 1, 0xff0000);
+  layer.set(16, 15, 1, 0xff0000);
+  layer.updateMesh();
+  const all = { minX: 1.8, maxX: 2.2, minY: 1.8, maxY: 2.2, minZ: 0, maxZ: 0.5 };
+  const live = layer.getCollisionBoxesInAABB(all);
+  const before = layer.getCollisionBoxesInAABB(all, true);
+  const stamp = layer.getCollisionStamp(0, 0);
+  layer.set(15, 15, 1, 0x00ff00, 'painted');
+  assert.equal(layer.getCollisionBoxesInAABB(all)[0], live[0], 'live geometry ignores visual labels');
+  layer.updateMesh();
+  assert.equal(layer.getCollisionBoxesInAABB(all, true)[0], before[0]);
+  assert.deepEqual(layer.getCollisionStamp(0, 0), stamp, 'paint must not wake resting bodies');
+  layer.delete(15, 15, 1);
+  layer.updateMesh();
+  assert.equal(layer.getCollisionBoxesInAABB(all, true)[0], before[1],
+    'a neighbor face becoming visible does not change its occupied geometry');
+  assert.notDeepEqual(layer.getCollisionStamp(0, 0), stamp);
+});
+
+test('fully enclosed three-dimensional partitions retain published solid collision', () => {
+  const layer = new MicroVoxelLayer();
+  // One solid partition and a one-cell shell completely occluding its faces.
+  for (let x = 15; x <= 32; x++) for (let y = 15; y <= 32; y++) for (let z = 15; z <= 32; z++) {
+    layer.set(x, y, z, 0x123456);
+  }
+  layer.updateMesh();
+  assert.equal(layer.meshChunks.has('1,1,1'), false, 'the enclosed partition emits no triangles');
+  assert.equal(layer.getPublishedCollisionColor(24, 24, 24), 0x123456);
+  assert.deepEqual(layer.getCollisionBoxesInAABB({ minX: 3, maxX: 3.1, minY: 3, maxY: 3.1, minZ: 3, maxZ: 3.1 }, true), [{
+    minX: 2, maxX: 4, minY: 2, maxY: 4, minZ: 2, maxZ: 4,
+  }]);
+  layer.delete(24, 24, 24);
+  assert.equal(layer.getPublishedCollisionColor(24, 24, 24), 0x123456, 'unpublished holes stay closed');
+  layer.updateMesh();
+  assert.equal(layer.getPublishedCollisionColor(24, 24, 24), null);
+});
+
+test('incremental clear does not prebuild every cold collision index synchronously', () => {
+  const layer = new MicroVoxelLayer() as any;
+  layer.set(2, 10, 2, 1);
+  layer.set(2, 100, 2, 2);
+  layer.updateMesh();
+  const original = layer.collisionIndexForPartition.bind(layer);
+  let queries = 0;
+  layer.collisionIndexForPartition = (...args: any[]) => { queries++; return original(...args); };
+  const cursor = layer.beginClearChunk(0, 0);
+  assert.equal(queries, 0, 'clearing detaches memberships without synchronous collision construction');
+  layer.continueClearChunk(cursor, 1);
+  const beforePublication = layer.getCollisionBoxesInAABB({ minX: 0, maxX: 1, minY: 0, maxY: 20, minZ: 0, maxZ: 1 }, true);
+  assert.equal(beforePublication.length, 2, 'a cold query still sees the entire old published shape');
+  layer.continueClearChunk(cursor);
+  layer.updateMesh();
+  assert.deepEqual(layer.getCollisionBoxesInAABB({ minX: 0, maxX: 1, minY: 0, maxY: 20, minZ: 0, maxZ: 1 }, true), []);
+});
+
+test('collision queries include solids touching the bottom of a vertical partition boundary', () => {
+  const layer = new MicroVoxelLayer();
+  layer.set(2, 15, 2, 1);
+  const bounds = { minX: 0.25, maxX: 0.375, minY: 2, maxY: 2.1, minZ: 0.25, maxZ: 0.375 };
+  assert.equal(layer.getCollisionBoxesInAABB(bounds).length, 1);
+});
+
+test('revealing a face across a standard-chunk boundary does not wake that neighbor', () => {
+  const layer = new MicroVoxelLayer();
+  layer.set(127, 5, 5, 1);
+  layer.set(128, 5, 5, 1);
+  layer.updateMesh();
+  const neighborStamp = layer.getCollisionStamp(1, 0);
+  layer.delete(127, 5, 5);
+  layer.updateMesh();
+  assert.deepEqual(layer.getCollisionStamp(1, 0), neighborStamp);
+  assert.equal(layer.meshChunks.get('8,0,0')!.geometry.index!.count, 36);
+});

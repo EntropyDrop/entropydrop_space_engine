@@ -14,10 +14,10 @@ import {
 import { MICRO_DIVISIONS, MICRO_SIZE } from './MicroGrid.ts';
 export { MICRO_DIVISIONS, MICRO_SIZE } from './MicroGrid.ts';
 const STANDARD_CHUNK_MICRO_SIZE = 16 * MICRO_DIVISIONS;
-// Smaller than a standard terrain chunk so a dense imported model cannot turn
-// one mesh rebuild into a long main-thread task. These are meshing partitions,
-// not distance-based LOD: every 0.125 m cell remains represented exactly.
-const MICRO_MESH_CHUNK_SIZE = 4 * MICRO_DIVISIONS;
+// Bound both meshing and cold collision builds in all three dimensions. A local
+// edit never scans an entire terrain column or restarts work at another height.
+// Each 2 m partition contains at most 4096 exact 0.125 m cells.
+const MICRO_MESH_CHUNK_SIZE = 2 * MICRO_DIVISIONS;
 const MICRO_MESH_CHUNKS_PER_STANDARD_AXIS = STANDARD_CHUNK_MICRO_SIZE / MICRO_MESH_CHUNK_SIZE;
 const MICRO_WORLD_SIZE_X = TORUS_SIZE_X * MICRO_DIVISIONS;
 const MICRO_WORLD_SIZE_Z = TORUS_SIZE_Z * MICRO_DIVISIONS;
@@ -32,6 +32,7 @@ type MicroMeshBuildJob = {
   chunkKey: string;
   standardChunkKey: string;
   revision: number;
+  collisionRevision: number;
   chunkCx: number;
   chunkCz: number;
   originMx: number;
@@ -97,8 +98,8 @@ function key(mx, my, mz) {
   return `${wrapMicroX(mx)},${my},${wrapMicroZ(mz)}`;
 }
 
-function meshChunkKey(mx, mz) {
-  return `${Math.floor(wrapMicroX(mx) / MICRO_MESH_CHUNK_SIZE)},${Math.floor(wrapMicroZ(mz) / MICRO_MESH_CHUNK_SIZE)}`;
+function meshChunkKey(mx: number, my: number, mz: number) {
+  return `${Math.floor(wrapMicroX(mx) / MICRO_MESH_CHUNK_SIZE)},${Math.floor(wrapMicroZ(mz) / MICRO_MESH_CHUNK_SIZE)},${Math.floor(my / MICRO_MESH_CHUNK_SIZE)}`;
 }
 
 function standardChunkKeyForMeshChunk(meshKey: string): string {
@@ -128,6 +129,14 @@ export class MicroVoxelLayer {
   private collisionIndexes = new Map<string, CollisionBoxIndex<CollisionBounds>>();
   private publishedCollisionIndexes = new Map<string, CollisionBoxIndex<CollisionBounds>>();
   private collisionPublicationVersions = new Map<string, number>();
+  private collisionRevisions = new Map<string, number>();
+  private publishedCollisionRevisions = new Map<string, number>();
+  // Fully enclosed solid partitions can have no visible mesh and still collide.
+  private publishedCollisionPartitions = new Set<string>();
+  private detachedCollisionCells = new Map<string, Set<number>>();
+  private standardChunkPartitions = new Map<string, Set<string>>();
+  private chunkRevisions = new Map<string, number>();
+  private horizontalColumnPartitions = new Map<string, Set<string>>();
   material: THREE.MeshStandardMaterial;
 
   constructor() {
@@ -164,8 +173,24 @@ export class MicroVoxelLayer {
     return this.cells.has(key(mx, my, mz));
   }
 
-  private invalidateMeshChunk(chunkKey: string) {
+  private trackPartition(chunkKey: string) {
+    const standardKey = standardChunkKeyForMeshChunk(chunkKey);
+    let standard = this.standardChunkPartitions.get(standardKey);
+    if (!standard) this.standardChunkPartitions.set(standardKey, standard = new Set());
+    standard.add(chunkKey);
+    const columnKey = chunkKey.slice(0, chunkKey.lastIndexOf(','));
+    let column = this.horizontalColumnPartitions.get(columnKey);
+    if (!column) this.horizontalColumnPartitions.set(columnKey, column = new Set());
+    column.add(chunkKey);
+  }
+
+  private invalidateCollisionPartition(chunkKey: string) {
     this.collisionIndexes.delete(chunkKey);
+    this.collisionRevisions.set(chunkKey, (this.collisionRevisions.get(chunkKey) ?? 0) + 1);
+  }
+
+  private invalidateMeshChunk(chunkKey: string) {
+    if (!this.meshChunkRevisions.has(chunkKey)) this.trackPartition(chunkKey);
     // A staged mesh is immutable for the revision that produced it. Retire it
     // as soon as a newer edit invalidates that revision; otherwise an inactive
     // boundary companion cannot rebuild and its stale deferred entry can hold
@@ -180,33 +205,40 @@ export class MicroVoxelLayer {
     this.dirty = true;
   }
 
-  private markMeshChunkDirty(mx, mz) {
-    for (const chunkKey of this.affectedMeshChunkKeys(mx, mz)) {
+  private markMeshChunkDirty(mx: number, my: number, mz: number) {
+    const standardKey = standardChunkKeyForMeshChunk(meshChunkKey(mx, my, mz));
+    this.chunkRevisions.set(standardKey, (this.chunkRevisions.get(standardKey) ?? 0) + 1);
+    for (const chunkKey of this.affectedMeshChunkKeys(mx, my, mz)) {
       this.invalidateMeshChunk(chunkKey);
     }
   }
 
-  private affectedMeshChunkKeys(mx: number, mz: number) {
+  private affectedMeshChunkKeys(mx: number, my: number, mz: number) {
     const wrappedX = wrapMicroX(mx);
     const wrappedZ = wrapMicroZ(mz);
-    const affected = [meshChunkKey(wrappedX, wrappedZ)];
-    const localX = wrappedX % MICRO_MESH_CHUNK_SIZE;
-    const localZ = wrappedZ % MICRO_MESH_CHUNK_SIZE;
-    if (localX === 0) affected.push(meshChunkKey(wrappedX - 1, wrappedZ));
-    if (localX === MICRO_MESH_CHUNK_SIZE - 1) {
-      affected.push(meshChunkKey(wrappedX + 1, wrappedZ));
-    }
-    if (localZ === 0) affected.push(meshChunkKey(wrappedX, wrappedZ - 1));
-    if (localZ === MICRO_MESH_CHUNK_SIZE - 1) {
-      affected.push(meshChunkKey(wrappedX, wrappedZ + 1));
+    const affected = [meshChunkKey(wrappedX, my, wrappedZ)];
+    const coordinates = [wrappedX, my, wrappedZ];
+    for (let axis = 0; axis < 3; axis++) {
+      const local = ((coordinates[axis] % MICRO_MESH_CHUNK_SIZE) + MICRO_MESH_CHUNK_SIZE) % MICRO_MESH_CHUNK_SIZE;
+      if (local !== 0 && local !== MICRO_MESH_CHUNK_SIZE - 1) continue;
+      const neighbor = [...coordinates];
+      neighbor[axis] += local === 0 ? -1 : 1;
+      affected.push(meshChunkKey(neighbor[0], neighbor[1], neighbor[2]));
     }
     return affected;
   }
 
-  /** Promote a local edit and its boundary companions ahead of background work. */
-  prioritizeMeshAt(mx: number, mz: number) {
-    const prioritized = this.affectedMeshChunkKeys(mx, mz)
-      .filter(chunkKey => this.dirtyMeshChunks.has(chunkKey));
+  /** Promote one edit and its boundary companions; omitted height targets a column. */
+  prioritizeMeshAt(mx: number, mz: number, my?: number) {
+    let candidates: string[];
+    if (my === undefined) {
+      const columns = new Set(this.affectedMeshChunkKeys(mx, 0, mz)
+        .map(chunkKey => chunkKey.slice(0, chunkKey.lastIndexOf(','))));
+      candidates = [...columns].flatMap(column => [...(this.horizontalColumnPartitions.get(column) ?? [])]);
+    } else {
+      candidates = this.affectedMeshChunkKeys(mx, my, mz);
+    }
+    const prioritized = candidates.filter(chunkKey => this.dirtyMeshChunks.has(chunkKey));
     if (prioritized.length === 0) return;
 
     // A resumable background build is no longer the highest-priority work once
@@ -228,28 +260,32 @@ export class MicroVoxelLayer {
   }
 
   /** A standard cell can touch two micro partitions on either horizontal axis. */
-  prioritizeStandardCell(wx: number, wz: number) {
+  prioritizeStandardCell(wx: number, wz: number, wy?: number) {
     const baseMx = wx * MICRO_DIVISIONS;
     const baseMz = wz * MICRO_DIVISIONS;
     for (const mx of [baseMx, baseMx + MICRO_DIVISIONS - 1]) {
       for (const mz of [baseMz, baseMz + MICRO_DIVISIONS - 1]) {
-        this.prioritizeMeshAt(mx, mz);
+        if (wy === undefined) this.prioritizeMeshAt(mx, mz);
+        else for (const my of [wy * MICRO_DIVISIONS, (wy + 1) * MICRO_DIVISIONS - 1]) {
+          this.prioritizeMeshAt(mx, mz, my);
+        }
       }
     }
   }
 
-  private addChunkCell(packedKey: number, mx, mz) {
-    const chunkKey = meshChunkKey(mx, mz);
+  private addChunkCell(packedKey: number, mx, my, mz) {
+    const chunkKey = meshChunkKey(mx, my, mz);
     let cells = this.chunkCells.get(chunkKey);
     if (!cells) {
       cells = new Set();
       this.chunkCells.set(chunkKey, cells);
+      this.trackPartition(chunkKey);
     }
     cells.add(packedKey);
   }
 
-  private removeChunkCell(packedKey: number, mx, mz) {
-    const chunkKey = meshChunkKey(mx, mz);
+  private removeChunkCell(packedKey: number, mx, my, mz) {
+    const chunkKey = meshChunkKey(mx, my, mz);
     const cells = this.chunkCells.get(chunkKey);
     cells?.delete(packedKey);
     if (cells?.size === 0) this.chunkCells.delete(chunkKey);
@@ -257,11 +293,10 @@ export class MicroVoxelLayer {
 
   /** Journal one cell before mutation so picking stays on the rendered mesh. */
   private preservePublishedCollisionCell(mx: number, my: number, mz: number) {
-    const chunkKey = meshChunkKey(mx, mz);
-    // No mesh means this partition currently presents empty space. New live
-    // cells remain unpickable through getPublishedCollisionColor until their
-    // first mesh publication.
-    if (!this.meshChunks.has(chunkKey)) return;
+    const chunkKey = meshChunkKey(mx, my, mz);
+    // Cells first become pickable when their partition publishes. The presence
+    // set also includes completely enclosed solids that emit no visible mesh.
+    if (!this.publishedCollisionPartitions.has(chunkKey)) return;
     let snapshot = this.publishedCollisionSnapshots.get(chunkKey);
     if (!snapshot) {
       snapshot = new Map();
@@ -286,10 +321,13 @@ export class MicroVoxelLayer {
     this.preservePublishedCollisionCell(mx, my, mz);
     this.cells.set(cellKey, normalized);
     this.packedColors.set(packedKey, normalized);
-    if (isNew) this.addChunkCell(packedKey, mx, mz);
+    if (isNew) {
+      this.addChunkCell(packedKey, mx, my, mz);
+      this.invalidateCollisionPartition(meshChunkKey(mx, my, mz));
+    }
     if (part) this.parts.set(cellKey, part);
     else this.parts.delete(cellKey);
-    this.markMeshChunkDirty(mx, mz);
+    this.markMeshChunkDirty(mx, my, mz);
     return true;
   }
 
@@ -303,8 +341,9 @@ export class MicroVoxelLayer {
     this.parts.delete(cellKey);
     if (removed) {
       this.packedColors.delete(packedKey);
-      this.removeChunkCell(packedKey, mx, mz);
-      this.markMeshChunkDirty(mx, mz);
+      this.removeChunkCell(packedKey, mx, my, mz);
+      this.invalidateCollisionPartition(meshChunkKey(mx, my, mz));
+      this.markMeshChunkDirty(mx, my, mz);
     }
     return removed;
   }
@@ -363,26 +402,26 @@ export class MicroVoxelLayer {
     return cursor.removed;
   }
 
-  /** Detach a chunk's indexes in constant time before incremental removal. */
+  /** Detach indexed occupied partitions before incremental cell removal. */
   beginClearChunk(chunkX: number, chunkZ: number): MicroChunkClearCursor {
-    const originMx = chunkX * STANDARD_CHUNK_MICRO_SIZE;
-    const originMz = chunkZ * STANDARD_CHUNK_MICRO_SIZE;
-    const targetMeshChunks: string[] = [];
+    const standardKey = `${Math.floor(wrapMicroX(chunkX * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)},${Math.floor(wrapMicroZ(chunkZ * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)}`;
+    const targetMeshChunks = [...(this.standardChunkPartitions.get(standardKey) ?? [])]
+      .filter(chunkKey => this.chunkCells.has(chunkKey)
+        || this.publishedCollisionPartitions.has(chunkKey)
+        || this.detachedCollisionCells.has(chunkKey));
+    this.chunkRevisions.set(standardKey, (this.chunkRevisions.get(standardKey) ?? 0) + 1);
     const cellIterators: Iterator<number>[] = [];
-    for (let dx = 0; dx < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dx++) {
-      for (let dz = 0; dz < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dz++) {
-        const targetMx = originMx + dx * MICRO_MESH_CHUNK_SIZE;
-        const targetMz = originMz + dz * MICRO_MESH_CHUNK_SIZE;
-        const targetKey = meshChunkKey(targetMx, targetMz);
-        targetMeshChunks.push(targetKey);
-        // Snapshot the complete published shape before the live index is detached.
-        // Incremental clearing must never expose a partially removed collider.
-        if (this.meshChunks.has(targetKey)) this.collisionIndexForPartition(targetKey, true);
-        this.collisionIndexes.delete(targetKey);
-        const cellKeys = this.chunkCells.get(targetKey);
-        if (cellKeys?.size) cellIterators.push(cellKeys.values());
-        this.chunkCells.delete(targetKey);
+    for (const targetKey of targetMeshChunks) {
+      const cellKeys = this.chunkCells.get(targetKey);
+      if (!cellKeys?.size) continue;
+      // Keep the detached membership for cold published queries while removal
+      // journals individual cells. Do not synchronously build every collider.
+      if (this.publishedCollisionPartitions.has(targetKey)) {
+        this.detachedCollisionCells.set(targetKey, cellKeys);
       }
+      this.invalidateCollisionPartition(targetKey);
+      cellIterators.push(cellKeys.values());
+      this.chunkCells.delete(targetKey);
     }
     return {
       targetMeshChunks,
@@ -427,14 +466,17 @@ export class MicroVoxelLayer {
     // Rebuild the cleared subchunks plus their immediate neighbours so faces
     // exposed along the 16 m snapshot boundary appear immediately.
     for (const targetKey of cursor.targetMeshChunks) {
-      const [meshCx, meshCz] = targetKey.split(',').map(Number);
+      const [meshCx, meshCz, meshCy] = targetKey.split(',').map(Number);
       const targetMx = meshCx * MICRO_MESH_CHUNK_SIZE;
+      const targetMy = meshCy * MICRO_MESH_CHUNK_SIZE;
       const targetMz = meshCz * MICRO_MESH_CHUNK_SIZE;
       this.invalidateMeshChunk(targetKey);
-      this.invalidateMeshChunk(meshChunkKey(targetMx - 1, targetMz));
-      this.invalidateMeshChunk(meshChunkKey(targetMx + MICRO_MESH_CHUNK_SIZE, targetMz));
-      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMz - 1));
-      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMz + MICRO_MESH_CHUNK_SIZE));
+      this.invalidateMeshChunk(meshChunkKey(targetMx - 1, targetMy, targetMz));
+      this.invalidateMeshChunk(meshChunkKey(targetMx + MICRO_MESH_CHUNK_SIZE, targetMy, targetMz));
+      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMy - 1, targetMz));
+      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMy + MICRO_MESH_CHUNK_SIZE, targetMz));
+      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMy, targetMz - 1));
+      this.invalidateMeshChunk(meshChunkKey(targetMx, targetMy, targetMz + MICRO_MESH_CHUNK_SIZE));
     }
     cursor.complete = true;
     return true;
@@ -460,9 +502,10 @@ export class MicroVoxelLayer {
       this.cells.delete(cellKey);
       const packedKey = packedMicroKey(mx, my, mz);
       this.packedColors.delete(packedKey);
-      this.removeChunkCell(packedKey, mx, mz);
+      this.removeChunkCell(packedKey, mx, my, mz);
+      this.invalidateCollisionPartition(meshChunkKey(mx, my, mz));
       this.parts.delete(cellKey);
-      this.markMeshChunkDirty(mx, mz);
+      this.markMeshChunkDirty(mx, my, mz);
     }
 
     return extracted;
@@ -490,9 +533,10 @@ export class MicroVoxelLayer {
       this.cells.delete(cellKey);
       const packedKey = packedMicroKey(mx, my, mz);
       this.packedColors.delete(packedKey);
-      this.removeChunkCell(packedKey, mx, mz);
+      this.removeChunkCell(packedKey, mx, my, mz);
+      this.invalidateCollisionPartition(meshChunkKey(mx, my, mz));
       this.parts.delete(cellKey);
-      this.markMeshChunkDirty(mx, mz);
+      this.markMeshChunkDirty(mx, my, mz);
     }
     return extracted;
   }
@@ -563,6 +607,7 @@ export class MicroVoxelLayer {
     if (cached) return cached;
     const snapshot = published ? this.publishedCollisionSnapshots.get(chunkKey) : null;
     const keys = new Set(this.chunkCells.get(chunkKey));
+    if (published) for (const packed of this.detachedCollisionCells.get(chunkKey) ?? []) keys.add(packed);
     for (const packed of snapshot?.keys() ?? []) keys.add(packed);
     const cells = [];
     for (const packed of keys) {
@@ -589,50 +634,72 @@ export class MicroVoxelLayer {
   ): CollisionBounds[] {
     const result: CollisionBounds[] = [];
     const partitionSize = MICRO_MESH_CHUNK_SIZE * MICRO_SIZE;
-    const minCx = Math.floor(bounds.minX / partitionSize);
+    const minCx = Math.ceil(bounds.minX / partitionSize) - 1;
     const maxCx = Math.floor(bounds.maxX / partitionSize);
-    const minCz = Math.floor(bounds.minZ / partitionSize);
+    const minCz = Math.ceil(bounds.minZ / partitionSize) - 1;
     const maxCz = Math.floor(bounds.maxZ / partitionSize);
+    const minCy = Math.ceil(bounds.minY / partitionSize) - 1;
+    const maxCy = Math.floor(bounds.maxY / partitionSize);
     for (let cx = minCx; cx <= maxCx; cx++) {
       for (let cz = minCz; cz <= maxCz; cz++) {
         const mx = cx * MICRO_MESH_CHUNK_SIZE;
         const mz = cz * MICRO_MESH_CHUNK_SIZE;
-        const chunkKey = meshChunkKey(mx, mz);
         if (partitionAllowed && !partitionAllowed(mx, mz)) continue;
-        if (published ? !this.meshChunks.has(chunkKey) : !this.chunkCells.has(chunkKey)) continue;
+        const columnKey = `${Math.floor(wrapMicroX(mx) / MICRO_MESH_CHUNK_SIZE)},${Math.floor(wrapMicroZ(mz) / MICRO_MESH_CHUNK_SIZE)}`;
         const offsetX = (mx - wrapMicroX(mx)) * MICRO_SIZE;
         const offsetZ = (mz - wrapMicroZ(mz)) * MICRO_SIZE;
         const query = { ...bounds,
           minX: bounds.minX - offsetX, maxX: bounds.maxX - offsetX,
           minZ: bounds.minZ - offsetZ, maxZ: bounds.maxZ - offsetZ };
-        for (const box of this.collisionIndexForPartition(chunkKey, published).query(query)) {
-          result.push(offsetX === 0 && offsetZ === 0 ? box : { ...box,
-            minX: box.minX + offsetX, maxX: box.maxX + offsetX,
-            minZ: box.minZ + offsetZ, maxZ: box.maxZ + offsetZ });
+        for (const chunkKey of this.horizontalColumnPartitions.get(columnKey) ?? []) {
+          if (published ? !this.publishedCollisionPartitions.has(chunkKey) : !this.chunkCells.has(chunkKey)) continue;
+          const cy = Number(chunkKey.slice(chunkKey.lastIndexOf(',') + 1));
+          if (cy < minCy || cy > maxCy) continue;
+          for (const box of this.collisionIndexForPartition(chunkKey, published).query(query)) {
+            result.push(offsetX === 0 && offsetZ === 0 ? box : { ...box,
+              minX: box.minX + offsetX, maxX: box.maxX + offsetX,
+              minZ: box.minZ + offsetZ, maxZ: box.maxZ + offsetZ });
+          }
         }
       }
     }
     return result;
   }
 
-  /** Local publication counters for sleep invalidation, including empty partitions. */
+  /** One local counter changes only when occupied geometry is published. */
   getCollisionStamp(chunkX: number, chunkZ: number): number[] {
-    const versions: number[] = [];
-    for (let dx = 0; dx < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dx++) {
-      for (let dz = 0; dz < MICRO_MESH_CHUNKS_PER_STANDARD_AXIS; dz++) {
-        const chunkKey = meshChunkKey(chunkX * STANDARD_CHUNK_MICRO_SIZE + dx * MICRO_MESH_CHUNK_SIZE,
-          chunkZ * STANDARD_CHUNK_MICRO_SIZE + dz * MICRO_MESH_CHUNK_SIZE);
-        versions.push(this.collisionPublicationVersions.get(chunkKey) ?? 0);
+    const standardKey = `${Math.floor(wrapMicroX(chunkX * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)},${Math.floor(wrapMicroZ(chunkZ * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)}`;
+    return [this.collisionPublicationVersions.get(standardKey) ?? 0];
+  }
+
+  /** Live color/occupancy changes for terrain previews such as the minimap. */
+  getChunkRevision(chunkX: number, chunkZ: number): number {
+    const standardKey = `${Math.floor(wrapMicroX(chunkX * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)},${Math.floor(wrapMicroZ(chunkZ * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)}`;
+    return this.chunkRevisions.get(standardKey) ?? 0;
+  }
+
+  /** Enumerate stored values in a standard chunk without scanning empty height. */
+  forEachCellInChunk(
+    chunkX: number,
+    chunkZ: number,
+    visit: (mx: number, my: number, mz: number, color: number) => void,
+  ) {
+    const standardKey = `${Math.floor(wrapMicroX(chunkX * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)},${Math.floor(wrapMicroZ(chunkZ * STANDARD_CHUNK_MICRO_SIZE) / STANDARD_CHUNK_MICRO_SIZE)}`;
+    for (const chunkKey of this.standardChunkPartitions.get(standardKey) ?? []) {
+      for (const packed of this.chunkCells.get(chunkKey) ?? []) {
+        const color = this.packedColors.get(packed);
+        if (color === undefined) continue;
+        const [mx, my, mz] = unpackMicroKey(packed);
+        visit(mx, my, mz, color);
       }
     }
-    return versions;
   }
 
   getPublishedCollisionColor(mx: number, my: number, mz: number) {
-    const chunkKey = meshChunkKey(mx, mz);
+    const chunkKey = meshChunkKey(mx, my, mz);
     const snapshot = this.publishedCollisionSnapshots.get(chunkKey);
     if (!snapshot) {
-      return this.meshChunks.has(chunkKey) ? this.get(mx, my, mz) : null;
+      return this.publishedCollisionPartitions.has(chunkKey) ? this.get(mx, my, mz) : null;
     }
     const packedKey = packedMicroKey(mx, my, mz);
     return snapshot.has(packedKey)
@@ -646,6 +713,7 @@ export class MicroVoxelLayer {
       if (this.dirtyMeshChunks.has(chunkKey)) continue;
       if (this.activeMeshBuild?.chunkKey === chunkKey) continue;
       this.publishedCollisionSnapshots.delete(chunkKey);
+      this.detachedCollisionCells.delete(chunkKey);
     }
   }
 
@@ -799,6 +867,7 @@ export class MicroVoxelLayer {
       chunkKey,
       standardChunkKey: standardChunkKeyForMeshChunk(chunkKey),
       revision: this.meshChunkRevisions.get(chunkKey) ?? 0,
+      collisionRevision: this.collisionRevisions.get(chunkKey) ?? 0,
       chunkCx,
       chunkCz,
       originMx: chunkCx * MICRO_MESH_CHUNK_SIZE,
@@ -875,14 +944,14 @@ export class MicroVoxelLayer {
           const index = job.maskIndex++;
           const i = index % job.maskWidth;
           const j = Math.floor(index / job.maskWidth);
-          const position = [0, 0, 0];
-          position[job.axis] = job.slice;
-          position[job.u] = i;
-          position[job.v] = j;
-          const neighbor = [...position];
-          neighbor[job.axis]++;
-          const a = this.sampleMeshCell(job, position[0], position[1], position[2]);
-          const b = this.sampleMeshCell(job, neighbor[0], neighbor[1], neighbor[2]);
+          const lx = job.axis === 0 ? job.slice : job.u === 0 ? i : j;
+          const ly = job.axis === 1 ? job.slice : job.u === 1 ? i : j;
+          const lz = job.axis === 2 ? job.slice : job.u === 2 ? i : j;
+          const a = this.sampleMeshCell(job, lx, ly, lz);
+          const b = this.sampleMeshCell(job,
+            lx + (job.axis === 0 ? 1 : 0),
+            ly + (job.axis === 1 ? 1 : 0),
+            lz + (job.axis === 2 ? 1 : 0));
           const aInside = job.slice >= 0;
           const bInside = job.slice + 1 < dimensions[job.axis];
           mask[index] = a !== undefined && b === undefined && aInside
@@ -1157,9 +1226,15 @@ export class MicroVoxelLayer {
     // Mesh publication and collision publication share the same synchronous
     // commit point, including empty -> filled and empty -> empty partitions.
     this.publishedCollisionSnapshots.delete(job.chunkKey);
-    this.publishedCollisionIndexes.delete(job.chunkKey);
-    this.collisionPublicationVersions.set(job.chunkKey,
-      (this.collisionPublicationVersions.get(job.chunkKey) ?? 0) + 1);
+    this.detachedCollisionCells.delete(job.chunkKey);
+    if (Number.isFinite(job.minMicroY)) this.publishedCollisionPartitions.add(job.chunkKey);
+    else this.publishedCollisionPartitions.delete(job.chunkKey);
+    if ((this.publishedCollisionRevisions.get(job.chunkKey) ?? 0) !== job.collisionRevision) {
+      this.publishedCollisionIndexes.delete(job.chunkKey);
+      this.publishedCollisionRevisions.set(job.chunkKey, job.collisionRevision);
+      this.collisionPublicationVersions.set(job.standardChunkKey,
+        (this.collisionPublicationVersions.get(job.standardChunkKey) ?? 0) + 1);
+    }
     if (!previous) return;
     this.group.remove(previous);
     previous.geometry.dispose();

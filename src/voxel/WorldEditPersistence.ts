@@ -13,7 +13,9 @@ import type { SpaceStorage } from '../storage/SpaceStorage.ts';
 const STORAGE_SCHEMA_VERSION = 3;
 const STORAGE_PREFIX = 'space.world-edits.v3';
 const DEFAULT_SAVE_DELAY_MS = 75;
-const DEFAULT_REMOTE_BATCH_DELAY_MS = 200;
+// A subdivision spans several batches. Drain its queued suffix after each ACK;
+// the initial save delay still coalesces clicks, and failures retain retry backoff.
+const DEFAULT_REMOTE_BATCH_DELAY_MS = 0;
 const REMOTE_RETRY_DELAY_MS = 2_000;
 const MAX_TRANSIENT_REMOTE_RETRY_DELAY_MS = 30_000;
 const MAX_SERVER_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
@@ -103,8 +105,15 @@ export interface PersistedMicroEdit {
   part: string | null;
 }
 
+interface RemoteChunkPendingBatch {
+  batchId: string;
+  mutations: TerrainMutation[];
+  state: 'pending' | 'preserve' | 'resolved';
+}
+
 export interface RemoteChunkReplacementCursor {
   chunkKey: string;
+  revision: number | null;
   previousStandardIterator: Iterator<[string, PersistedStandardEdit]> | null;
   previousMicroIterator: Iterator<[string, PersistedMicroEdit]> | null;
   standard: unknown[];
@@ -113,6 +122,22 @@ export interface RemoteChunkReplacementCursor {
   microIndex: number;
   standardLimit: number;
   microLimit: number;
+  previousStandard: Map<string, PersistedStandardEdit> | null;
+  previousMicro: Map<string, PersistedMicroEdit> | null;
+  comparisonStarted: boolean;
+  comparisonStandardIterator: Iterator<[string, PersistedStandardEdit]> | null;
+  comparisonMicroIterator: Iterator<[string, PersistedMicroEdit]> | null;
+  baselineReady: boolean;
+  baselineMutations: TerrainMutation[];
+  baselineMutationIndex: number;
+  localMutations: TerrainMutation[];
+  localMutationIndex: number;
+  pendingReplayed: boolean;
+  pendingBatches: RemoteChunkPendingBatch[];
+  acknowledgementVersion: number;
+  replayedAcknowledgementVersion: number;
+  /** Reliable only once complete: the replacement preserves the previous overlay. */
+  unchanged: boolean;
   complete: boolean;
 }
 
@@ -151,12 +176,49 @@ function zoneKeyForChunkKey(chunkKey: string) {
   return `${Math.floor(chunkX / SURFACE_ZONE_SIZE_CHUNKS)},${Math.floor(chunkZ / SURFACE_ZONE_SIZE_CHUNKS)}`;
 }
 
+interface BatchFootprint {
+  indexedMutations: number;
+  chunkKeys: Set<string>;
+  zoneKeys: Set<string>;
+}
+
+// Keep derived bookkeeping outside the durable/wire payload. Mutation arrays
+// are append-only while collecting; a server size split creates fresh arrays.
+const batchFootprints = new WeakMap<TerrainMutation[], BatchFootprint>();
+
 function batchAcceptsMutation(batch: PersistedMutationBatch, mutation: TerrainMutation) {
-  const chunkKeys = new Set(batch.mutations.map(chunkKeyForMutation));
-  chunkKeys.add(chunkKeyForMutation(mutation));
-  if (chunkKeys.size > MAX_CHUNKS_PER_BATCH) return false;
-  const zoneKeys = new Set([...chunkKeys].map(zoneKeyForChunkKey));
-  return zoneKeys.size <= MAX_ZONES_PER_BATCH;
+  let footprint = batchFootprints.get(batch.mutations);
+  if (!footprint || footprint.indexedMutations > batch.mutations.length) {
+    footprint = { indexedMutations: 0, chunkKeys: new Set(), zoneKeys: new Set() };
+    batchFootprints.set(batch.mutations, footprint);
+  }
+  // Index each appended operation once instead of rescanning up to 256 prior
+  // operations for every one of a spoon subdivision's 512 microcells.
+  while (footprint.indexedMutations < batch.mutations.length) {
+    const chunkKey = chunkKeyForMutation(batch.mutations[footprint.indexedMutations++]);
+    if (footprint.chunkKeys.has(chunkKey)) continue;
+    footprint.chunkKeys.add(chunkKey);
+    footprint.zoneKeys.add(zoneKeyForChunkKey(chunkKey));
+  }
+  const chunkKey = chunkKeyForMutation(mutation);
+  if (footprint.chunkKeys.has(chunkKey)) return true;
+  if (footprint.chunkKeys.size >= MAX_CHUNKS_PER_BATCH) return false;
+  return footprint.zoneKeys.has(zoneKeyForChunkKey(chunkKey))
+    || footprint.zoneKeys.size < MAX_ZONES_PER_BATCH;
+}
+
+function acknowledgedChunkRevision(result: unknown, chunkKey: string): number | null {
+  const chunks = (result as { chunks?: unknown })?.chunks;
+  if (!Array.isArray(chunks)) return null;
+  let revision: number | null = null;
+  for (const chunk of chunks) {
+    if (!Number.isSafeInteger(chunk?.chunk_x) || !Number.isSafeInteger(chunk?.chunk_z)
+      || `${chunk.chunk_x},${chunk.chunk_z}` !== chunkKey) continue;
+    if (!Number.isSafeInteger(chunk.revision) || chunk.revision < 0) return null;
+    if (revision !== null && revision !== chunk.revision) return null;
+    revision = chunk.revision;
+  }
+  return revision;
 }
 
 function parseTerrainEditQuota(value: unknown): TerrainEditQuota | null {
@@ -220,6 +282,7 @@ export class WorldEditPersistence {
   private readonly standardEditsByChunk = new Map<string, Map<string, PersistedStandardEdit>>();
   private readonly microEdits = new Map<string, PersistedMicroEdit>();
   private readonly microEditsByChunk = new Map<string, Map<string, PersistedMicroEdit>>();
+  private readonly activeRemoteReplacements = new Map<string, RemoteChunkReplacementCursor>();
   private readonly pendingBatches: PersistedMutationBatch[] = [];
   /** A transmitted (or reload-restored) batch id must never gain new mutations. */
   private readonly sealedBatchIds = new Set<string>();
@@ -317,8 +380,9 @@ export class WorldEditPersistence {
 
     const standard = Array.isArray(chunk.standard) ? chunk.standard : [];
     const micro = Array.isArray(chunk.micro) ? chunk.micro : [];
-    return {
+    const cursor: RemoteChunkReplacementCursor = {
       chunkKey,
+      revision: Number.isSafeInteger(chunk.revision) && chunk.revision >= 0 ? chunk.revision : null,
       previousStandardIterator: previousStandard?.entries() ?? null,
       previousMicroIterator: previousMicro?.entries() ?? null,
       standard,
@@ -327,8 +391,28 @@ export class WorldEditPersistence {
       microIndex: 0,
       standardLimit: Math.min(standard.length, MAX_STORED_STANDARD_EDITS),
       microLimit: Math.min(micro.length, MAX_STORED_MICRO_EDITS),
+      previousStandard: previousStandard ?? null,
+      previousMicro: previousMicro ?? null,
+      comparisonStarted: false,
+      comparisonStandardIterator: null,
+      comparisonMicroIterator: null,
+      baselineReady: false,
+      baselineMutations: [],
+      baselineMutationIndex: 0,
+      localMutations: [],
+      localMutationIndex: 0,
+      pendingReplayed: false,
+      pendingBatches: this.pendingBatches.flatMap(batch => {
+        const mutations = batch.mutations.filter(mutation => chunkKeyForMutation(mutation) === chunkKey);
+        return mutations.length > 0 ? [{ batchId: batch.batchId, mutations, state: 'pending' as const }] : [];
+      }),
+      acknowledgementVersion: 0,
+      replayedAcknowledgementVersion: -1,
+      unchanged: false,
       complete: false,
     };
+    this.activeRemoteReplacements.set(chunkKey, cursor);
+    return cursor;
   }
 
   /** Continue a bounded remote replacement; returns true once it is complete. */
@@ -337,6 +421,12 @@ export class WorldEditPersistence {
     maxPackedEdits = Number.POSITIVE_INFINITY,
   ): boolean {
     if (cursor.complete) return true;
+    if (cursor.pendingReplayed
+      && cursor.replayedAcknowledgementVersion !== cursor.acknowledgementVersion) {
+      // ACKs establish whether the fetched snapshot predates a local commit.
+      // Reinstall using the resolved per-chunk order, retaining newer commits.
+      this.restartRemoteChunkTarget(cursor);
+    }
     let remaining = Number.isFinite(maxPackedEdits)
       ? Math.max(1, Math.floor(maxPackedEdits))
       : Number.POSITIVE_INFINITY;
@@ -364,6 +454,16 @@ export class WorldEditPersistence {
 
     if (cursor.previousStandardIterator || cursor.previousMicroIterator) return false;
 
+    // The old maps also drive global-cache cleanup. Do not mutate their keys
+    // until those iterators finish, or a local deletion could skip stale keys.
+    while (!cursor.baselineReady && cursor.baselineMutationIndex < cursor.baselineMutations.length
+      && remaining > 0) {
+      this.applyMutationToReplacementBaseline(cursor, cursor.baselineMutations[cursor.baselineMutationIndex++]);
+      remaining--;
+    }
+    if (cursor.baselineMutationIndex < cursor.baselineMutations.length) return false;
+    cursor.baselineReady = true;
+
     while (cursor.standardIndex < cursor.standardLimit && remaining > 0) {
       this.loadPackedStandardEdit(cursor.standard[cursor.standardIndex++]);
       remaining--;
@@ -378,12 +478,131 @@ export class WorldEditPersistence {
       return false;
     }
 
-    // A remote snapshot can race a still-unacknowledged local batch. Reapply
-    // the durable outbox so local intent stays visible and is not discarded.
-    this.replayPendingBatchesForChunk(cursor.chunkKey);
-    this.reconcileStandardMicroExclusionForChunk(cursor.chunkKey);
+    if (!cursor.pendingReplayed) {
+      // Replay the captured outbox in its original order, keeping acknowledged
+      // writes only when their chunk revision is newer than this snapshot.
+      // Clicks made after the snapshot was fetched are always replayed last.
+      this.replayPendingBatchesForReplacement(cursor);
+      cursor.pendingReplayed = true;
+      cursor.replayedAcknowledgementVersion = cursor.acknowledgementVersion;
+    }
+    while (cursor.localMutationIndex < cursor.localMutations.length && remaining > 0) {
+      this.applyMutationLocally(cursor.localMutations[cursor.localMutationIndex++]);
+      remaining--;
+    }
+    if (cursor.localMutationIndex < cursor.localMutations.length) return false;
+    if (!cursor.comparisonStarted) {
+      this.reconcileStandardMicroExclusionForChunk(cursor.chunkKey);
+      cursor.comparisonStarted = true;
+      cursor.comparisonStandardIterator = cursor.previousStandard?.entries() ?? null;
+      cursor.comparisonMicroIterator = cursor.previousMicro?.entries() ?? null;
+    }
+    return this.continueRemoteChunkComparison(cursor, remaining);
+  }
+
+  private restartRemoteChunkTarget(cursor: RemoteChunkReplacementCursor) {
+    cursor.previousStandardIterator = this.standardEditsByChunk.get(cursor.chunkKey)?.entries() ?? null;
+    cursor.previousMicroIterator = this.microEditsByChunk.get(cursor.chunkKey)?.entries() ?? null;
+    this.standardEditsByChunk.delete(cursor.chunkKey);
+    this.microEditsByChunk.delete(cursor.chunkKey);
+    cursor.standardIndex = cursor.microIndex = cursor.localMutationIndex = 0;
+    cursor.pendingReplayed = cursor.comparisonStarted = false;
+    cursor.comparisonStandardIterator = cursor.comparisonMicroIterator = null;
+  }
+
+  private finishRemoteChunkReplacement(cursor: RemoteChunkReplacementCursor, unchanged = false) {
+    cursor.unchanged = unchanged;
     cursor.complete = true;
+    if (this.activeRemoteReplacements.get(cursor.chunkKey) === cursor) {
+      this.activeRemoteReplacements.delete(cursor.chunkKey);
+    }
     return true;
+  }
+
+  private continueRemoteChunkComparison(cursor: RemoteChunkReplacementCursor, remaining: number) {
+    const standard = this.standardEditsByChunk.get(cursor.chunkKey);
+    const micro = this.microEditsByChunk.get(cursor.chunkKey);
+    if (
+      cursor.acknowledgementVersion > 0
+      || this.activeRemoteReplacements.get(cursor.chunkKey) !== cursor
+      || (cursor.previousStandard?.size ?? 0) !== (standard?.size ?? 0)
+      || (cursor.previousMicro?.size ?? 0) !== (micro?.size ?? 0)
+    ) {
+      // A pre-existing outbox entry crossing an ACK boundary may have hidden a
+      // later remote write. Keep the authoritative replacement in that case.
+      return this.finishRemoteChunkReplacement(cursor);
+    }
+    while (cursor.comparisonStandardIterator && remaining > 0) {
+      const next = cursor.comparisonStandardIterator.next();
+      if (next.done) {
+        cursor.comparisonStandardIterator = null;
+        break;
+      }
+      const [key, previous] = next.value;
+      const current = standard?.get(key);
+      if (!current || current.block !== previous.block || current.color !== previous.color) {
+        return this.finishRemoteChunkReplacement(cursor);
+      }
+      remaining--;
+    }
+    while (!cursor.comparisonStandardIterator && cursor.comparisonMicroIterator && remaining > 0) {
+      const next = cursor.comparisonMicroIterator.next();
+      if (next.done) {
+        cursor.comparisonMicroIterator = null;
+        break;
+      }
+      const [key, previous] = next.value;
+      const current = micro?.get(key);
+      if (!current || current.color !== previous.color || current.part !== previous.part) {
+        return this.finishRemoteChunkReplacement(cursor);
+      }
+      remaining--;
+    }
+    if (cursor.comparisonStandardIterator || cursor.comparisonMicroIterator) return false;
+    return this.finishRemoteChunkReplacement(cursor, true);
+  }
+
+  private applyMutationToReplacementBaseline(cursor: RemoteChunkReplacementCursor, mutation: TerrainMutation) {
+    if (mutation.kind === 'set_micro') {
+      const edit = this.normalizeMicroEdit(mutation.mx, mutation.my, mutation.mz, mutation.color, mutation.part);
+      if (edit) (cursor.previousMicro ??= new Map()).set(microKey(edit.mx, edit.my, edit.mz), edit);
+      return;
+    }
+    if (mutation.kind === 'remove_micro') {
+      cursor.previousMicro?.delete(microKey(mutation.mx, mutation.my, mutation.mz));
+      return;
+    }
+    if (mutation.kind === 'set_standard') {
+      const edit = this.normalizeStandardEdit(mutation.x, mutation.y, mutation.z, mutation.block, mutation.color);
+      if (!edit) return;
+      (cursor.previousStandard ??= new Map()).set(standardKey(edit.x, edit.y, edit.z), edit);
+      if (edit.block === 0) return;
+    }
+    const baseX = mutation.x * MICRO_DIVISIONS;
+    const baseY = mutation.y * MICRO_DIVISIONS;
+    const baseZ = mutation.z * MICRO_DIVISIONS;
+    for (let dx = 0; dx < MICRO_DIVISIONS; dx++) {
+      for (let dy = 0; dy < MICRO_DIVISIONS; dy++) {
+        for (let dz = 0; dz < MICRO_DIVISIONS; dz++) {
+          cursor.previousMicro?.delete(microKey(baseX + dx, baseY + dy, baseZ + dz));
+        }
+      }
+    }
+  }
+
+  private noteRemoteBatchResolution(batchId: string, result?: unknown) {
+    for (const cursor of this.activeRemoteReplacements.values()) {
+      const batch = cursor.pendingBatches.find(batch => batch.batchId === batchId);
+      if (!batch) continue;
+      // A snapshot older than the ACK cannot contain that committed mutation.
+      // Dropping its overlay would restore a microcell the server just deleted.
+      // Equal/newer snapshots may contain a later player's write and win instead.
+      const revision = acknowledgedChunkRevision(result, cursor.chunkKey);
+      batch.state = revision !== null && cursor.revision !== null && revision > cursor.revision
+        ? 'preserve'
+        : 'resolved';
+      cursor.acknowledgementVersion++;
+    }
   }
 
   recordStandard(x: number, y: number, z: number, block: number, color: number) {
@@ -585,6 +804,15 @@ export class WorldEditPersistence {
   }
 
   private enqueueMutation(mutation: TerrainMutation) {
+    const cursor = this.activeRemoteReplacements.get(chunkKeyForMutation(mutation));
+    if (cursor) {
+      if (cursor.baselineReady) this.applyMutationToReplacementBaseline(cursor, mutation);
+      else cursor.baselineMutations.push(mutation);
+      // Even during comparison retain the journal for a possible ACK-driven
+      // authoritative reinstall, but do not replay over newer live writes now.
+      cursor.localMutations.push(mutation);
+      if (cursor.comparisonStarted) cursor.localMutationIndex = cursor.localMutations.length;
+    }
     if (this.remote) {
       let batch = this.pendingBatches[this.pendingBatches.length - 1];
       if (
@@ -660,6 +888,7 @@ export class WorldEditPersistence {
       const quota = parseTerrainEditQuota((result as any)?.quota);
       if (quota) this.quota = quota;
       this.blockedCode = null;
+      this.noteRemoteBatchResolution(batch.batchId, result);
       const index = this.pendingBatches.findIndex(item => item.batchId === batch.batchId);
       if (index >= 0) this.pendingBatches.splice(index, 1);
       this.sealedBatchIds.delete(batch.batchId);
@@ -701,6 +930,7 @@ export class WorldEditPersistence {
         (error as any).permanent = true;
       }
       if ((error as any)?.permanent === true) {
+        this.noteRemoteBatchResolution(batch.batchId);
         const index = this.pendingBatches.findIndex(item => item.batchId === batch.batchId);
         if (index >= 0) this.pendingBatches.splice(index, 1);
         this.sealedBatchIds.delete(batch.batchId);
@@ -741,6 +971,17 @@ export class WorldEditPersistence {
       createdAtMs: Date.now(),
     };
     this.pendingBatches.splice(index, 1, first, second);
+    for (const cursor of this.activeRemoteReplacements.values()) {
+      const capturedIndex = cursor.pendingBatches.findIndex(captured => captured.batchId === batch.batchId);
+      if (capturedIndex < 0) continue;
+      const replacements = [first, second].flatMap(split => {
+        const mutations = split.mutations.filter(mutation => chunkKeyForMutation(mutation) === cursor.chunkKey);
+        return mutations.length > 0
+          ? [{ batchId: split.batchId, mutations, state: 'pending' as const }]
+          : [];
+      });
+      cursor.pendingBatches.splice(capturedIndex, 1, ...replacements);
+    }
     this.sealedBatchIds.add(first.batchId);
     this.sealedBatchIds.add(second.batchId);
     return true;
@@ -973,11 +1214,10 @@ export class WorldEditPersistence {
     }
   }
 
-  private replayPendingBatchesForChunk(chunkKey: string) {
-    for (const batch of this.pendingBatches) {
-      for (const mutation of batch.mutations) {
-        if (chunkKeyForMutation(mutation) === chunkKey) this.applyMutationLocally(mutation);
-      }
+  private replayPendingBatchesForReplacement(cursor: RemoteChunkReplacementCursor) {
+    for (const batch of cursor.pendingBatches) {
+      if (batch.state === 'resolved') continue;
+      for (const mutation of batch.mutations) this.applyMutationLocally(mutation);
     }
   }
 

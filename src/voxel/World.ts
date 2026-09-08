@@ -11,6 +11,7 @@ import {
 import {
   WorldEditPersistence,
   type TerrainEditChunk,
+  type TerrainMutation,
   type PersistedMicroEdit,
   type PersistedStandardEdit,
   type RemoteChunkReplacementCursor,
@@ -62,7 +63,8 @@ type PendingRemoteChunkApplyJob = {
   cz: number;
   revision: number;
   phase: 'micro-clear' | 'persistence' | 'micro' | 'standard';
-  microClearCursor: MicroChunkClearCursor;
+  microClearCursor: MicroChunkClearCursor | null;
+  previousChunk: Chunk | null;
   persistenceCursor: RemoteChunkReplacementCursor | null;
   microIterator: Iterator<PersistedMicroEdit> | null;
   standardIterator: Iterator<PersistedStandardEdit> | null;
@@ -208,8 +210,19 @@ export class World {
     this.worldGroup.add(this.distantSurface.mesh);
     this.microVoxels = new MicroVoxelLayer();
     this.worldGroup.add(this.microVoxels.group);
+    const remote = persistenceOptions?.remote;
     this.editPersistence = persistenceOptions?.worldId
-      ? new WorldEditPersistence(persistenceOptions)
+      ? new WorldEditPersistence(remote ? {
+        ...persistenceOptions,
+        remote: {
+          ...remote,
+          sendBatch: async (batchId, mutations, metadata) => {
+            const result = await remote.sendBatch(batchId, mutations, metadata);
+            this.acknowledgeLocalTerrainBatch(mutations, result);
+            return result;
+          },
+        },
+      } : persistenceOptions)
       : null;
 
     // Generated terrain contains no micro voxels, so its sparse authored layer
@@ -527,7 +540,7 @@ export class World {
     this.setBlock(wx, wy, wz, BlockTypes.AIR, true);
     const n = this.microVoxels.subdivide(wx, wy, wz, color);
     if (n > 0) {
-      this.microVoxels.prioritizeStandardCell(wx, wz);
+      this.microVoxels.prioritizeStandardCell(wx, wz, wy);
       const { cx, cz } = this.worldToChunkCoords(wx, wz);
       this.crossLayerPublicationChunks.add(World.getChunkKey(cx, cz));
       this.trackPendingRemoteMicroOverride({ type: 'subdivide', wx, wy, wz, color });
@@ -556,7 +569,7 @@ export class World {
     if (this.getBlock(wx, wy, wz) !== BlockTypes.AIR) return false;
     const ok = this.microVoxels.set(mx, my, mz, color, part);
     if (ok) {
-      this.microVoxels.prioritizeMeshAt(mx, mz);
+      this.microVoxels.prioritizeMeshAt(mx, mz, my);
       const persistedColor = this.microVoxels.get(mx, my, mz);
       this.editPersistence?.recordMicro(mx, my, mz, persistedColor, part);
       this.trackPendingRemoteMicroOverride({
@@ -572,7 +585,7 @@ export class World {
     return ok;
   }
 
-  /** Read a microblock by integer microcell index (five microcells per standard cell). */
+  /** Read a microblock by integer microcell index (eight microcells per standard cell). */
   getMicroBlock(mx, my, mz) {
     const color = this.microVoxels.get(wrapMicroX(mx), my, wrapMicroZ(mz));
     if (color === null || color === undefined) return null;
@@ -618,7 +631,7 @@ export class World {
     );
     const acceptedLiveDelete = removed && !alreadyPendingDelete;
     if (acceptedLiveDelete || acceptedPublishedDelete) {
-      if (removed) this.microVoxels.prioritizeMeshAt(mx, mz);
+      if (removed) this.microVoxels.prioritizeMeshAt(mx, mz, my);
       this.editPersistence?.removeMicro(mx, my, mz, pendingSameChunk);
       this.trackPendingRemoteMicroOverride({ type: 'delete', mx, my, mz });
       this.terrainVersion++;
@@ -654,7 +667,7 @@ export class World {
     const removed = this.microVoxels.clearStandardCell(wx, wy, wz);
     const acceptedPublishedClear = removed === 0 && publishedCount > 0;
     if (removed || acceptedPublishedClear) {
-      if (removed) this.microVoxels.prioritizeStandardCell(wx, wz);
+      if (removed) this.microVoxels.prioritizeStandardCell(wx, wz, wy);
       this.editPersistence?.removeMicroStandardCell(
         wx,
         wy,
@@ -1269,6 +1282,18 @@ export class World {
     const nextCompleted = this.completedTerrainWorkerJobs[0];
     if (!nextCompleted) return false;
     const { job: nextJob, result: nextResult } = nextCompleted;
+    if (nextJob.type === 'remesh' && (
+      this.pendingRemoteChunkUpdates.has(nextJob.key)
+      || this.pendingRemoteChunkApply?.key === nextJob.key
+      || this.pendingTerrainSnapshots.has(nextJob.key)
+    )) {
+      // This local remesh predates an authoritative replacement. Its dataVersion
+      // can still match the old live chunk, but publishing it would release the
+      // new snapshot's micro barrier against the old standard blocks. Discard it
+      // before the micro-ready check so it cannot hold up the replacement worker.
+      this.completedTerrainWorkerJobs.shift();
+      return false;
+    }
     const nextChunk = this.chunks.get(nextJob.key) ?? null;
     if (
       this.crossLayerPublicationChunks.has(nextJob.key)
@@ -1448,6 +1473,24 @@ export class World {
     if (!worker || this.terrainWorkerJob) return false;
     if (this.completedTerrainWorkerJobs.length > 0) return false;
 
+    // A distant snapshot backlog must not postpone a direct edit. A same-chunk
+    // authoritative replacement still takes precedence over its local remesh.
+    let remeshChunk: Chunk | null = null;
+    for (const chunk of this.interactiveDirtyChunks) {
+      const key = World.getChunkKey(chunk.cx, chunk.cz);
+      if (!this.activeChunkKeys.has(key) || !this.dirtyChunks.has(chunk)) {
+        this.interactiveDirtyChunks.delete(chunk);
+        continue;
+      }
+      const replacing = this.pendingTerrainSnapshots.has(key)
+        || this.pendingRemoteChunkUpdates.has(key)
+        || this.pendingRemoteChunkApply?.key === key;
+      if (replacing) continue;
+      remeshChunk = chunk;
+      break;
+    }
+    if (remeshChunk) return this.dispatchChunkRemesh(worker, remeshChunk);
+
     // Authoritative snapshots replace a published chunk only after their full
     // generated data and mesh are ready. Until then, the previous collision
     // arrays and detailed mesh remain live.
@@ -1495,55 +1538,13 @@ export class World {
       return true;
     }
 
-    // Rebuild direct player edits before ordinary dirty chunks. Keeping this
-    // queue separate also lets the render loop service it without waiting for
-    // requestIdleCallback while movement is continuously streaming terrain.
-    let remeshChunk: Chunk | null = null;
-    for (const chunk of this.interactiveDirtyChunks) {
+    for (const chunk of this.dirtyChunks) {
       const key = World.getChunkKey(chunk.cx, chunk.cz);
-      if (!this.activeChunkKeys.has(key) || !this.dirtyChunks.has(chunk)) {
-        this.interactiveDirtyChunks.delete(chunk);
-        continue;
-      }
-      remeshChunk = chunk;
-      break;
-    }
-    if (!remeshChunk) {
-      for (const chunk of this.dirtyChunks) {
-        const key = World.getChunkKey(chunk.cx, chunk.cz);
-        if (!this.activeChunkKeys.has(key)) continue;
-        remeshChunk = chunk;
-        break;
-      }
-    }
-    if (remeshChunk) {
-      const key = World.getChunkKey(remeshChunk.cx, remeshChunk.cz);
-      const occupied = remeshChunk.getOccupiedYRange();
-      const blocks = remeshChunk.blocks.slice();
-      const colors = remeshChunk.colors.slice();
-      const job: TerrainWorkerJob = {
-        requestId: this.nextTerrainWorkerRequestId++,
-        type: 'remesh',
-        key,
-        cx: remeshChunk.cx,
-        cz: remeshChunk.cz,
-        dataVersion: remeshChunk.dataVersion,
-        remeshChunk,
-      };
-      this.terrainWorkerJob = job;
-      worker.postMessage({
-        type: job.type,
-        requestId: job.requestId,
-        seed: this.terrainSeed,
-        cx: job.cx,
-        cz: job.cz,
-        dataVersion: job.dataVersion,
-        minOccupiedY: occupied?.min ?? 0,
-        maxOccupiedY: occupied?.max ?? -1,
-        blocksBuffer: blocks.buffer,
-        colorsBuffer: colors.buffer,
-      }, [blocks.buffer, colors.buffer]);
-      return true;
+      if (!this.activeChunkKeys.has(key)
+        || this.pendingTerrainSnapshots.has(key)
+        || this.pendingRemoteChunkUpdates.has(key)
+        || this.pendingRemoteChunkApply?.key === key) continue;
+      return this.dispatchChunkRemesh(worker, chunk);
     }
 
     while (this.pendingStreamChunks.length > 0) {
@@ -1593,6 +1594,36 @@ export class World {
       return true;
     }
     return false;
+  }
+
+  private dispatchChunkRemesh(worker: Worker, remeshChunk: Chunk) {
+    const key = World.getChunkKey(remeshChunk.cx, remeshChunk.cz);
+    const occupied = remeshChunk.getOccupiedYRange();
+    const blocks = remeshChunk.blocks.slice();
+    const colors = remeshChunk.colors.slice();
+    const job: TerrainWorkerJob = {
+      requestId: this.nextTerrainWorkerRequestId++,
+      type: 'remesh',
+      key,
+      cx: remeshChunk.cx,
+      cz: remeshChunk.cz,
+      dataVersion: remeshChunk.dataVersion,
+      remeshChunk,
+    };
+    this.terrainWorkerJob = job;
+    worker.postMessage({
+      type: job.type,
+      requestId: job.requestId,
+      seed: this.terrainSeed,
+      cx: job.cx,
+      cz: job.cz,
+      dataVersion: job.dataVersion,
+      minOccupiedY: occupied?.min ?? 0,
+      maxOccupiedY: occupied?.max ?? -1,
+      blocksBuffer: blocks.buffer,
+      colorsBuffer: colors.buffer,
+    }, [blocks.buffer, colors.buffer]);
+    return true;
   }
 
   /**
@@ -1913,7 +1944,7 @@ export class World {
     const extracted = this.microVoxels.extractRegion(minX, minY, minZ, maxX, maxY, maxZ);
     if (extracted.length > 0) {
       for (const cell of extracted) {
-        this.microVoxels.prioritizeMeshAt(cell.mx, cell.mz);
+        this.microVoxels.prioritizeMeshAt(cell.mx, cell.mz, cell.my);
         this.editPersistence?.removeMicro(cell.mx, cell.my, cell.mz);
         this.trackPendingRemoteMicroOverride({
           type: 'delete',
@@ -1936,7 +1967,7 @@ export class World {
     const extracted = this.microVoxels.extractCellsInBox(minMx, minMy, minMz, maxMx, maxMy, maxMz);
     if (extracted.length > 0) {
       for (const cell of extracted) {
-        this.microVoxels.prioritizeMeshAt(cell.mx, cell.mz);
+        this.microVoxels.prioritizeMeshAt(cell.mx, cell.mz, cell.my);
         this.editPersistence?.removeMicro(cell.mx, cell.my, cell.mz);
         this.trackPendingRemoteMicroOverride({
           type: 'delete',
@@ -1953,6 +1984,42 @@ export class World {
   /** Force pending browser-local terrain edits to durable storage. */
   flushPersistedEdits() {
     return this.editPersistence?.flush() ?? false;
+  }
+
+  private acknowledgeLocalTerrainBatch(mutations: TerrainMutation[], result: unknown) {
+    const chunks = (result as { chunks?: unknown })?.chunks;
+    if (!Array.isArray(chunks) || this.editPersistence?.getSyncStatus().blockedCode) return;
+    const touched = new Set(mutations.map(mutation => {
+      const micro = mutation.kind === 'set_micro' || mutation.kind === 'remove_micro';
+      const x = micro ? mutation.mx / MICRO_DIVISIONS : mutation.x;
+      const z = micro ? mutation.mz / MICRO_DIVISIONS : mutation.z;
+      const { cx, cz } = this.worldToChunkCoords(x, z);
+      return World.getChunkKey(cx, cz);
+    }));
+    for (const value of chunks) {
+      const cx = Number(value?.chunk_x);
+      const cz = Number(value?.chunk_z);
+      const revision = Number(value?.revision);
+      if (![cx, cz, revision].every(Number.isSafeInteger) || revision < 1) continue;
+      const key = World.getChunkKey(cx, cz);
+      if (!touched.has(key) || !this.chunks.get(key)?.mesh) continue;
+      const previous = this.remoteChunkRevisions.get(key);
+      // A consecutive per-chunk revision proves no other writer changed this
+      // chunk between the installed baseline and our accepted edit. A gap must
+      // fetch/apply the authoritative snapshot, even if our local edit is newer.
+      if (previous === undefined || revision !== previous + 1) continue;
+      if (this.pendingRemoteChunkApply?.key === key
+        || this.pendingTerrainSnapshots.has(key)
+        || (this.terrainWorkerJob?.key === key && this.terrainWorkerJob.snapshot)
+        || this.completedTerrainWorkerJobs.some(({ job }) => job.key === key && job.snapshot)
+        || this.suspendedCrossLayerPublicationChunks.has(key)) continue;
+      this.remoteChunkRevisions.set(key, revision);
+      if (Number(this.pendingRemoteChunkUpdates.get(key)?.revision ?? Infinity) <= revision) {
+        this.pendingRemoteChunkUpdates.delete(key);
+      }
+      // Deliberately do not advance the global heartbeat/event cursor: another
+      // chunk can contain intervening edits that this ACK says nothing about.
+    }
   }
 
   /**
@@ -2017,22 +2084,22 @@ export class World {
     const cz = wrapChunkZ(update.chunk_z);
     const key = World.getChunkKey(cx, cz);
     const revision = Number.isFinite(Number(update.revision)) ? Number(update.revision) : 0;
-    if (this.activeChunkKeys.has(key) && this.chunks.get(key)?.mesh) {
-      this.crossLayerPublicationChunks.add(key);
-    }
-    this.microMeshBuildBlockedChunks.add(key);
-    const microClearCursor = this.microVoxels.beginClearChunk(cx, cz);
     const persistenceCursor = this.editPersistence
       ? this.editPersistence.beginRemoteChunkReplacement(update)
       : null;
+    // Compare the canonical snapshot (including the pending local outbox)
+    // before touching the rendered cells. Echoes of our own edits commonly
+    // advance the server revision without changing any local geometry.
+    const microClearCursor = persistenceCursor ? null : this.beginRemoteMicroReplacement(key, cx, cz);
     return {
       update,
       key,
       cx,
       cz,
       revision,
-      phase: 'micro-clear',
+      phase: persistenceCursor ? 'persistence' : 'micro-clear',
       microClearCursor,
+      previousChunk: this.chunks.get(key) ?? null,
       persistenceCursor,
       microIterator: null,
       standardIterator: null,
@@ -2047,6 +2114,26 @@ export class World {
     };
   }
 
+  private beginRemoteMicroReplacement(key: string, cx: number, cz: number) {
+    if (this.activeChunkKeys.has(key) && this.chunks.get(key)?.mesh) {
+      this.crossLayerPublicationChunks.add(key);
+    }
+    this.microMeshBuildBlockedChunks.add(key);
+    return this.microVoxels.beginClearChunk(cx, cz);
+  }
+
+  private canKeepRemoteChunkGeometry(job: PendingRemoteChunkApplyJob) {
+    // Persistence can already contain a newer staged snapshot whose mesh has
+    // not arrived. Only skip an echo when the live chunk is still the same
+    // installed chunk, with no authoritative replacement waiting to publish.
+    return Boolean(job.previousChunk?.mesh)
+      && this.chunks.get(job.key) === job.previousChunk
+      && !this.pendingTerrainSnapshots.has(job.key)
+      && !(this.terrainWorkerJob?.key === job.key && this.terrainWorkerJob.snapshot)
+      && !this.completedTerrainWorkerJobs.some(({ job: pending }) => pending.key === job.key && pending.snapshot)
+      && !this.suspendedCrossLayerPublicationChunks.has(job.key);
+  }
+
   private advancePendingRemoteChunkApply(
     frameWorkStartedAt: number,
     workBudgetMs: number,
@@ -2056,20 +2143,26 @@ export class World {
     const job = this.pendingRemoteChunkApply;
     if (!job) return true;
 
-    if (job.phase === 'micro-clear') {
-      if (!this.microVoxels.continueClearChunk(job.microClearCursor, maxEdits)) return false;
-      job.phase = job.persistenceCursor ? 'persistence' : 'micro';
-      if (performance.now() - frameWorkStartedAt >= workBudgetMs) return false;
-    }
-
     if (job.phase === 'persistence' && job.persistenceCursor) {
       const persistenceComplete = this.editPersistence!.continueRemoteChunkReplacement(
         job.persistenceCursor,
         maxEdits,
       );
       if (!persistenceComplete) return false;
+      if (job.persistenceCursor.unchanged && this.canKeepRemoteChunkGeometry(job)) {
+        this.remoteChunkRevisions.set(job.key, job.revision);
+        this.pendingRemoteChunkApply = null;
+        return true;
+      }
       job.microIterator = this.editPersistence!.getMicroEditsForChunk(job.cx, job.cz);
       job.standardIterator = this.editPersistence!.getStandardEditsForChunk(job.cx, job.cz);
+      job.microClearCursor = this.beginRemoteMicroReplacement(job.key, job.cx, job.cz);
+      job.phase = 'micro-clear';
+      if (performance.now() - frameWorkStartedAt >= workBudgetMs) return false;
+    }
+
+    if (job.phase === 'micro-clear') {
+      if (!this.microVoxels.continueClearChunk(job.microClearCursor!, maxEdits)) return false;
       job.phase = 'micro';
       if (performance.now() - frameWorkStartedAt >= workBudgetMs) return false;
     }
@@ -2162,7 +2255,7 @@ export class World {
     this.remoteChunkRevisions.set(job.key, job.revision);
     this.terrainVersion++;
     this.microMeshBuildBlockedChunks.delete(job.key);
-    this.microVoxels.finalizeCollisionSnapshots(job.microClearCursor.targetMeshChunks);
+    this.microVoxels.finalizeCollisionSnapshots(job.microClearCursor!.targetMeshChunks);
     this.pendingRemoteChunkApply = null;
     return true;
   }
