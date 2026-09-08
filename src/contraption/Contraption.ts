@@ -485,15 +485,71 @@ export class Contraption {
   /** Collision boxes quantized to the 0.125 micro grid: x/y/z are micro-cell
    *  indices and span is the box edge length in micro cells (8 for a standard
    *  voxel, 1 for a micro voxel). */
-  collisionCells: Array<{ x: number; y: number; z: number; span: number }>;
-  collisionEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }>;
-  /** Collision entries that can actually reach the exterior of their node's
-   * voxel union. Fully enclosed voxels never contribute a contact. */
-  collisionSurfaceEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }>;
+  private _collisionCells: Array<{ x: number; y: number; z: number; span: number }> | null = null;
+  private _collisionCellsDirty: boolean = false;
+  private _collisionEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }> | null = null;
+  private _collisionEntriesDirty: boolean = false;
+  private _collisionSurfaceEntries: Array<{ x: number; y: number; z: number; span: number; entityId: string }> | null = null;
+  private _collisionSurfaceEntriesDirty: boolean = false;
   collisionPhysicsBoxes: CollisionBox[];
   collisionTerrainBoxes: CollisionBox[];
   collisionCellCount: number;
   collisionPoseVersion: number;
+  collisionCellMap: Map<string, { x: number; y: number; z: number; span: number }>;
+  collisionEntryMap: Map<string, { x: number; y: number; z: number; span: number; entityId: string }>;
+  collisionSurfaceSet: Set<string>;
+  collisionRegionPhysicsBoxes: Map<string, CollisionBox[]>;
+  collisionRegionTerrainBoxes: Map<string, CollisionBox[]>;
+  collisionRegionEntries: Map<string, Map<string, any>>;
+  collisionRegionSurfaceEntries: Map<string, Map<string, any>>;
+  lastBlocksSet: Set<any>;
+
+  get collisionCells(): Array<{ x: number; y: number; z: number; span: number }> {
+    if (this._collisionCellsDirty || !this._collisionCells) {
+      this._collisionCells = this.collisionCellMap ? [...this.collisionCellMap.values()] : [];
+      this._collisionCellsDirty = false;
+    }
+    return this._collisionCells;
+  }
+  set collisionCells(val: Array<{ x: number; y: number; z: number; span: number }>) {
+    this._collisionCells = val;
+    this._collisionCellsDirty = false;
+  }
+
+  get collisionEntries(): Array<{ x: number; y: number; z: number; span: number; entityId: string }> {
+    if (this._collisionEntriesDirty || !this._collisionEntries) {
+      this._collisionEntries = this.collisionEntryMap ? [...this.collisionEntryMap.values()] : [];
+      this._collisionEntriesDirty = false;
+    }
+    return this._collisionEntries;
+  }
+  set collisionEntries(val: Array<{ x: number; y: number; z: number; span: number; entityId: string }>) {
+    this._collisionEntries = val;
+    this._collisionEntriesDirty = false;
+  }
+
+  get collisionSurfaceEntries(): Array<{ x: number; y: number; z: number; span: number; entityId: string }> {
+    if (this._collisionSurfaceEntriesDirty || !this._collisionSurfaceEntries) {
+      this._collisionSurfaceEntries = [];
+      if (this.collisionRegionSurfaceEntries) {
+        for (const map of this.collisionRegionSurfaceEntries.values()) {
+          for (const entry of map.values()) {
+            this._collisionSurfaceEntries.push(entry);
+          }
+        }
+      } else if (this.collisionEntries && this.collisionSurfaceSet) {
+        this._collisionSurfaceEntries = this.collisionEntries.filter(entry => (
+          this.collisionSurfaceSet.has(`${entry.entityId}:${entry.x},${entry.y},${entry.z}:${entry.span}`)
+        ));
+      }
+      this._collisionSurfaceEntriesDirty = false;
+    }
+    return this._collisionSurfaceEntries;
+  }
+  set collisionSurfaceEntries(val: Array<{ x: number; y: number; z: number; span: number; entityId: string }>) {
+    this._collisionSurfaceEntries = val;
+    this._collisionSurfaceEntriesDirty = false;
+  }
   private collisionVoxelIndexes: any = null;
   private pickingVoxelIndexes: any = null;
   collisionWorldAabbCache: { version: number; all?: any[]; surface?: any[]; merged?: any[] } | null;
@@ -2559,10 +2615,17 @@ export class Contraption {
   // BOUNDS & MESH GENERATION
   // =========================================================================
 
+  private static readonly COLLISION_REGION_SIZE = 32 * MICRO_DIVISIONS;
+
+  private static getCollisionRegionKey(x: number, y: number, z: number): string {
+    const reg = Contraption.COLLISION_REGION_SIZE;
+    return `${Math.floor(x / reg)},${Math.floor(y / reg)},${Math.floor(z / reg)}`;
+  }
+
   buildCollisionCells() {
     this.blockMap = new Map();
-    const cells = new Map();
-    const entries = new Map();
+    const cells = new Map<string, { x: number; y: number; z: number; span: number }>();
+    const entries = new Map<string, { x: number; y: number; z: number; span: number; entityId: string }>();
     for (const block of this.blocks) {
       const size = block.size || 1;
       const span = Math.max(1, Math.round(size / MICRO_SIZE));
@@ -2582,6 +2645,10 @@ export class Contraption {
     }
     this.collisionCells = [...cells.values()];
     this.collisionEntries = [...entries.values()];
+    this.collisionCellMap = cells;
+    this.collisionEntryMap = entries;
+    this.lastBlocksSet = new Set(this.blocks);
+
     // A voxel completely enclosed by six same-resolution neighbours cannot
     // reach an exterior terrain contact. Keeping a conservative surface set
     // avoids thousands of invisible terrain boxes in solid imported
@@ -2590,19 +2657,196 @@ export class Contraption {
     const entryKeys = new Set(this.collisionEntries.map(entry => (
       `${entry.entityId}:${entry.x},${entry.y},${entry.z}:${entry.span}`
     )));
-    this.collisionSurfaceEntries = this.collisionEntries.filter(entry => {
+    this.collisionSurfaceSet = new Set<string>();
+    for (const entry of this.collisionEntries) {
       const { entityId, x, y, z, span } = entry;
-      return ![
+      const isEnclosed = [
         [x - span, y, z], [x + span, y, z],
         [x, y - span, z], [x, y + span, z],
         [x, y, z - span], [x, y, z + span]
       ].every(([nx, ny, nz]) => entryKeys.has(`${entityId}:${nx},${ny},${nz}:${span}`));
-    });
-    this.collisionPhysicsBoxes = mergeCollisionCells(this.collisionEntries);
-    // Bound terrain-query volumes on rotated, large solid structures. Keep the
-    // original surface probes for support manifolds and swept terrain contacts.
-    this.collisionTerrainBoxes = mergeCollisionCells(this.collisionSurfaceEntries, 4 * MICRO_DIVISIONS);
-    this.collisionCellCount = this.collisionCells.length;
+      if (!isEnclosed) {
+        this.collisionSurfaceSet.add(`${entityId}:${x},${y},${z}:${span}`);
+      }
+    }
+    this.collisionSurfaceEntries = this.collisionEntries.filter(entry => (
+      this.collisionSurfaceSet.has(`${entry.entityId}:${entry.x},${entry.y},${entry.z}:${entry.span}`)
+    ));
+
+    this.collisionRegionPhysicsBoxes = new Map();
+    this.collisionRegionTerrainBoxes = new Map();
+    this.collisionRegionEntries = new Map();
+    this.collisionRegionSurfaceEntries = new Map();
+
+    for (const entry of this.collisionEntries) {
+      const regKey = Contraption.getCollisionRegionKey(entry.x, entry.y, entry.z);
+      let regMap = this.collisionRegionEntries.get(regKey);
+      if (!regMap) this.collisionRegionEntries.set(regKey, regMap = new Map());
+      const entryKey = `${entry.entityId}:${entry.x},${entry.y},${entry.z}:${entry.span}`;
+      regMap.set(entryKey, entry);
+      if (this.collisionSurfaceSet.has(entryKey)) {
+        let regSurf = this.collisionRegionSurfaceEntries.get(regKey);
+        if (!regSurf) this.collisionRegionSurfaceEntries.set(regKey, regSurf = new Map());
+        regSurf.set(entryKey, entry);
+      }
+    }
+
+    this.rebuildCollisionRegions();
+    this.collisionCellCount = this.collisionCellMap.size;
+    this.invalidateCollisionPoseCache?.();
+  }
+
+  private rebuildCollisionRegions() {
+    this.collisionRegionPhysicsBoxes.clear();
+    for (const [regKey, groupMap] of this.collisionRegionEntries) {
+      this.collisionRegionPhysicsBoxes.set(regKey, mergeCollisionCells([...groupMap.values()]));
+    }
+    this.collisionRegionTerrainBoxes.clear();
+    for (const [regKey, groupMap] of this.collisionRegionSurfaceEntries) {
+      this.collisionRegionTerrainBoxes.set(regKey, mergeCollisionCells([...groupMap.values()], 4 * MICRO_DIVISIONS));
+    }
+
+    this.collisionPhysicsBoxes = [].concat(...this.collisionRegionPhysicsBoxes.values());
+    this.collisionTerrainBoxes = [].concat(...this.collisionRegionTerrainBoxes.values());
+  }
+
+  updateCollisionIncremental(addedBlocks: any[] = [], removedBlocks: any[] = []) {
+    if (!this.collisionEntryMap || !this.collisionCellMap || !this.collisionSurfaceSet || !this.collisionRegionEntries) {
+      this.buildCollisionCells();
+      return;
+    }
+    const dirtyRegions = new Set<string>();
+
+    for (const block of removedBlocks) {
+      const size = block.size || 1;
+      const span = Math.max(1, Math.round(size / MICRO_SIZE));
+      const x = Math.floor(block.localX / MICRO_SIZE + 1e-6);
+      const y = Math.floor(block.localY / MICRO_SIZE + 1e-6);
+      const z = Math.floor(block.localZ / MICRO_SIZE + 1e-6);
+      const entityId = block.entityId || this.rootComponentId;
+      const cellKey = span > 1
+        ? `s:${Math.floor(x / MICRO_DIVISIONS)},${Math.floor(y / MICRO_DIVISIONS)},${Math.floor(z / MICRO_DIVISIONS)}`
+        : `m:${x},${y},${z}`;
+      const boxKey = `${x},${y},${z}:${span}`;
+      const entryKey = `${entityId}:${boxKey}`;
+
+      this.blockMap?.delete(cellKey);
+      this.collisionCellMap.delete(boxKey);
+      this.collisionEntryMap.delete(entryKey);
+      this.collisionSurfaceSet.delete(entryKey);
+
+      const regKey = Contraption.getCollisionRegionKey(x, y, z);
+      this.collisionRegionEntries?.get(regKey)?.delete(entryKey);
+      this.collisionRegionSurfaceEntries?.get(regKey)?.delete(entryKey);
+      dirtyRegions.add(regKey);
+
+      const neighbors = [
+        [x - span, y, z], [x + span, y, z],
+        [x, y - span, z], [x, y + span, z],
+        [x, y, z - span], [x, y, z + span]
+      ];
+      for (const [nx, ny, nz] of neighbors) {
+        const nKey = `${entityId}:${nx},${ny},${nz}:${span}`;
+        const nEntry = this.collisionEntryMap.get(nKey);
+        if (nEntry) {
+          this.collisionSurfaceSet.add(nKey);
+          const nRegKey = Contraption.getCollisionRegionKey(nx, ny, nz);
+          let nRegSurf = this.collisionRegionSurfaceEntries.get(nRegKey);
+          if (!nRegSurf) this.collisionRegionSurfaceEntries.set(nRegKey, nRegSurf = new Map());
+          nRegSurf.set(nKey, nEntry);
+          dirtyRegions.add(nRegKey);
+        }
+      }
+    }
+
+    for (const block of addedBlocks) {
+      const size = block.size || 1;
+      const span = Math.max(1, Math.round(size / MICRO_SIZE));
+      const x = Math.floor(block.localX / MICRO_SIZE + 1e-6);
+      const y = Math.floor(block.localY / MICRO_SIZE + 1e-6);
+      const z = Math.floor(block.localZ / MICRO_SIZE + 1e-6);
+      const entityId = block.entityId || this.rootComponentId;
+      const cellKey = span > 1
+        ? `s:${Math.floor(x / MICRO_DIVISIONS)},${Math.floor(y / MICRO_DIVISIONS)},${Math.floor(z / MICRO_DIVISIONS)}`
+        : `m:${x},${y},${z}`;
+      const boxKey = `${x},${y},${z}:${span}`;
+      const entryKey = `${entityId}:${boxKey}`;
+
+      this.blockMap?.set(cellKey, block.block);
+      const cellObj = { x, y, z, span };
+      const entryObj = { x, y, z, span, entityId };
+      this.collisionCellMap.set(boxKey, cellObj);
+      this.collisionEntryMap.set(entryKey, entryObj);
+
+      const regKey = Contraption.getCollisionRegionKey(x, y, z);
+      let regMap = this.collisionRegionEntries.get(regKey);
+      if (!regMap) this.collisionRegionEntries.set(regKey, regMap = new Map());
+      regMap.set(entryKey, entryObj);
+      dirtyRegions.add(regKey);
+
+      const neighbors = [
+        [x - span, y, z], [x + span, y, z],
+        [x, y - span, z], [x, y + span, z],
+        [x, y, z - span], [x, y, z + span]
+      ];
+      const allEnclosed = neighbors.every(([nx, ny, nz]) => (
+        this.collisionEntryMap.has(`${entityId}:${nx},${ny},${nz}:${span}`)
+      ));
+      if (!allEnclosed) {
+        this.collisionSurfaceSet.add(entryKey);
+        let regSurf = this.collisionRegionSurfaceEntries.get(regKey);
+        if (!regSurf) this.collisionRegionSurfaceEntries.set(regKey, regSurf = new Map());
+        regSurf.set(entryKey, entryObj);
+      } else {
+        this.collisionSurfaceSet.delete(entryKey);
+        this.collisionRegionSurfaceEntries?.get(regKey)?.delete(entryKey);
+      }
+
+      for (const [nx, ny, nz] of neighbors) {
+        const nKey = `${entityId}:${nx},${ny},${nz}:${span}`;
+        const nEntry = this.collisionEntryMap.get(nKey);
+        if (nEntry) {
+          const nRegKey = Contraption.getCollisionRegionKey(nx, ny, nz);
+          const nEnclosed = [
+            [nx - span, ny, nz], [nx + span, ny, nz],
+            [nx, ny - span, nz], [nx, ny + span, nz],
+            [nx, ny, nz - span], [nx, ny, nz + span]
+          ].every(([nnx, nny, nnz]) => this.collisionEntryMap.has(`${entityId}:${nnx},${nny},${nnz}:${span}`));
+          if (nEnclosed) {
+            this.collisionSurfaceSet.delete(nKey);
+            this.collisionRegionSurfaceEntries?.get(nRegKey)?.delete(nKey);
+          } else {
+            this.collisionSurfaceSet.add(nKey);
+            let nRegSurf = this.collisionRegionSurfaceEntries.get(nRegKey);
+            if (!nRegSurf) this.collisionRegionSurfaceEntries.set(nRegKey, nRegSurf = new Map());
+            nRegSurf.set(nKey, nEntry);
+          }
+          dirtyRegions.add(nRegKey);
+        }
+      }
+    }
+
+    for (const regKey of dirtyRegions) {
+      const regEntriesMap = this.collisionRegionEntries?.get(regKey);
+      if (regEntriesMap && regEntriesMap.size > 0) {
+        this.collisionRegionPhysicsBoxes.set(regKey, mergeCollisionCells([...regEntriesMap.values()]));
+      } else {
+        this.collisionRegionPhysicsBoxes.delete(regKey);
+      }
+      const regSurfaceMap = this.collisionRegionSurfaceEntries?.get(regKey);
+      if (regSurfaceMap && regSurfaceMap.size > 0) {
+        this.collisionRegionTerrainBoxes.set(regKey, mergeCollisionCells([...regSurfaceMap.values()], 4 * MICRO_DIVISIONS));
+      } else {
+        this.collisionRegionTerrainBoxes.delete(regKey);
+      }
+    }
+
+    this._collisionCellsDirty = true;
+    this._collisionEntriesDirty = true;
+    this._collisionSurfaceEntriesDirty = true;
+    this.collisionPhysicsBoxes = [].concat(...this.collisionRegionPhysicsBoxes.values());
+    this.collisionTerrainBoxes = [].concat(...this.collisionRegionTerrainBoxes.values());
+    this.collisionCellCount = this.collisionCellMap.size;
     this.invalidateCollisionPoseCache?.();
   }
 
@@ -2610,16 +2854,30 @@ export class Contraption {
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-    for (const cell of this.collisionCells) {
-      const x0 = cell.x * MICRO_SIZE, x1 = (cell.x + cell.span) * MICRO_SIZE;
-      const y0 = cell.y * MICRO_SIZE, y1 = (cell.y + cell.span) * MICRO_SIZE;
-      const z0 = cell.z * MICRO_SIZE, z1 = (cell.z + cell.span) * MICRO_SIZE;
-      if (x0 < minX) minX = x0;
-      if (y0 < minY) minY = y0;
-      if (z0 < minZ) minZ = z0;
-      if (x1 > maxX) maxX = x1;
-      if (y1 > maxY) maxY = y1;
-      if (z1 > maxZ) maxZ = z1;
+    if (this.collisionCellMap) {
+      for (const cell of this.collisionCellMap.values()) {
+        const x0 = cell.x * MICRO_SIZE, x1 = (cell.x + cell.span) * MICRO_SIZE;
+        const y0 = cell.y * MICRO_SIZE, y1 = (cell.y + cell.span) * MICRO_SIZE;
+        const z0 = cell.z * MICRO_SIZE, z1 = (cell.z + cell.span) * MICRO_SIZE;
+        if (x0 < minX) minX = x0;
+        if (y0 < minY) minY = y0;
+        if (z0 < minZ) minZ = z0;
+        if (x1 > maxX) maxX = x1;
+        if (y1 > maxY) maxY = y1;
+        if (z1 > maxZ) maxZ = z1;
+      }
+    } else {
+      for (const cell of this.collisionCells) {
+        const x0 = cell.x * MICRO_SIZE, x1 = (cell.x + cell.span) * MICRO_SIZE;
+        const y0 = cell.y * MICRO_SIZE, y1 = (cell.y + cell.span) * MICRO_SIZE;
+        const z0 = cell.z * MICRO_SIZE, z1 = (cell.z + cell.span) * MICRO_SIZE;
+        if (x0 < minX) minX = x0;
+        if (y0 < minY) minY = y0;
+        if (z0 < minZ) minZ = z0;
+        if (x1 > maxX) maxX = x1;
+        if (y1 > maxY) maxY = y1;
+        if (z1 > maxZ) maxZ = z1;
+      }
     }
 
     if (!Number.isFinite(minX)) {
@@ -2644,6 +2902,45 @@ export class Contraption {
       );
     }
 
+    this.boundingRadius = this.size.length() / 2;
+  }
+
+  updateBoundsIncremental(addedBlocks: any[] = [], removedBlocks: any[] = []) {
+    if (!this.minLocal || !this.maxLocal) {
+      this.calculateBoundsAndCenter();
+      return;
+    }
+    let boundaryRemoved = false;
+    for (const b of removedBlocks) {
+      const size = b.size || 1;
+      if (Math.abs(b.localX - this.minLocal.x) < 1e-4 ||
+          Math.abs(b.localX + size - this.maxLocal.x) < 1e-4 ||
+          Math.abs(b.localY - this.minLocal.y) < 1e-4 ||
+          Math.abs(b.localY + size - this.maxLocal.y) < 1e-4 ||
+          Math.abs(b.localZ - this.minLocal.z) < 1e-4 ||
+          Math.abs(b.localZ + size - this.maxLocal.z) < 1e-4) {
+        boundaryRemoved = true;
+        break;
+      }
+    }
+    if (boundaryRemoved) {
+      this.calculateBoundsAndCenter();
+      return;
+    }
+    for (const b of addedBlocks) {
+      const size = b.size || 1;
+      this.minLocal.x = Math.min(this.minLocal.x, b.localX);
+      this.minLocal.y = Math.min(this.minLocal.y, b.localY);
+      this.minLocal.z = Math.min(this.minLocal.z, b.localZ);
+      this.maxLocal.x = Math.max(this.maxLocal.x, b.localX + size);
+      this.maxLocal.y = Math.max(this.maxLocal.y, b.localY + size);
+      this.maxLocal.z = Math.max(this.maxLocal.z, b.localZ + size);
+    }
+    this.size.set(
+      this.maxLocal.x - this.minLocal.x,
+      this.maxLocal.y - this.minLocal.y,
+      this.maxLocal.z - this.minLocal.z
+    );
     this.boundingRadius = this.size.length() / 2;
   }
 
@@ -2816,11 +3113,12 @@ export class Contraption {
     }
 
     for (const node of this.entityNodes.values()) {
-      const nodeBlocks = this.blocks.filter(block => (block.entityId || this.rootComponentId) === node.id);
-      this.createVoxelMesh(nodeBlocks, node.pivotLocal, node.group);
+      this.buildNodeChunkMeshes(node);
     }
 
-    this.buildCollisionCells();
+    if (!this.collisionCellMap) {
+      this.buildCollisionCells();
+    }
     this.updateTransform();
     this.rebuildRigidBodies(previousBodies);
     for (const node of this.entityNodes.values()) {
@@ -2869,6 +3167,11 @@ export class Contraption {
         ).sub(node.pivotLocal).sub(centerOfMassLocal);
         maxRadiusSq = Math.max(maxRadiusSq, localCenter.lengthSq() + size * size * 0.75);
       }
+
+      node.blocks = new Set(ownedBlocks);
+      node.volume = volume;
+      node.weightedCenterSum = weightedCenter;
+      node.maxRadiusSq = maxRadiusSq;
 
       const type = isRoot
         ? this.bodyType
@@ -2944,6 +3247,114 @@ export class Contraption {
       const hasBodyA = constraint.bodyA === null || this.rigidBodies.has(constraint.bodyA);
       const hasBodyB = this.rigidBodies.has(constraint.bodyB);
       if (!hasBodyA || !hasBodyB) this.constraintDefinitions.delete(id);
+    }
+  }
+
+  updateNodeRigidBody(nodeId = this.rootComponentId, addedBlocks: any[] = [], removedBlocks: any[] = []) {
+    const id = String(nodeId || this.rootComponentId);
+    const node = this.entityNodes.get(id);
+    if (!node) return;
+    const isRoot = node.parentId === null;
+    const definition = isRoot ? null : this.childDefinitions.get(node.id);
+
+    if (!node.blocks || !node.weightedCenterSum) {
+      const ownedBlocks = this.blocks.filter(block => (block.entityId || this.rootComponentId) === node.id);
+      node.blocks = new Set(ownedBlocks);
+      node.volume = 0;
+      node.weightedCenterSum = new THREE.Vector3();
+      node.maxRadiusSq = 0;
+      for (const block of ownedBlocks) {
+        const size = block.size || 1;
+        const blockVolume = Math.pow(size, 3);
+        const center = new THREE.Vector3(
+          block.localX + size / 2,
+          block.localY + size / 2,
+          block.localZ + size / 2
+        );
+        node.weightedCenterSum.addScaledVector(center, blockVolume);
+        node.volume += blockVolume;
+      }
+      const centerEntity = node.volume > 0
+        ? node.weightedCenterSum.clone().divideScalar(node.volume)
+        : node.pivotLocal.clone();
+      const centerOfMassLocal = isRoot
+        ? new THREE.Vector3()
+        : centerEntity.sub(node.pivotLocal);
+      for (const block of ownedBlocks) {
+        const size = block.size || 1;
+        const localCenter = new THREE.Vector3(
+          block.localX + size / 2,
+          block.localY + size / 2,
+          block.localZ + size / 2
+        ).sub(node.pivotLocal).sub(centerOfMassLocal);
+        node.maxRadiusSq = Math.max(node.maxRadiusSq, localCenter.lengthSq() + size * size * 0.75);
+      }
+    } else {
+      for (const block of removedBlocks) {
+        if ((block.entityId || this.rootComponentId) === node.id) {
+          node.blocks.delete(block);
+          const size = block.size || 1;
+          const blockVolume = Math.pow(size, 3);
+          node.volume = Math.max(0, node.volume - blockVolume);
+          const center = new THREE.Vector3(
+            block.localX + size / 2,
+            block.localY + size / 2,
+            block.localZ + size / 2
+          );
+          node.weightedCenterSum.addScaledVector(center, -blockVolume);
+        }
+      }
+      for (const block of addedBlocks) {
+        if ((block.entityId || this.rootComponentId) === node.id) {
+          node.blocks.add(block);
+          const size = block.size || 1;
+          const blockVolume = Math.pow(size, 3);
+          node.volume += blockVolume;
+          const center = new THREE.Vector3(
+            block.localX + size / 2,
+            block.localY + size / 2,
+            block.localZ + size / 2
+          );
+          node.weightedCenterSum.addScaledVector(center, blockVolume);
+        }
+      }
+    }
+
+    const centerEntity = node.volume > 0
+      ? node.weightedCenterSum.clone().divideScalar(node.volume)
+      : node.pivotLocal.clone();
+    const centerOfMassLocal = isRoot
+      ? new THREE.Vector3()
+      : centerEntity.sub(node.pivotLocal);
+
+    for (const block of addedBlocks) {
+      if ((block.entityId || this.rootComponentId) === node.id) {
+        const size = block.size || 1;
+        const localCenter = new THREE.Vector3(
+          block.localX + size / 2,
+          block.localY + size / 2,
+          block.localZ + size / 2
+        ).sub(node.pivotLocal).sub(centerOfMassLocal);
+        node.maxRadiusSq = Math.max(node.maxRadiusSq || 0, localCenter.lengthSq() + size * size * 0.75);
+      }
+    }
+
+    const configuredMass = isRoot
+      ? this.massOverride
+      : normalizeBodyMass(definition?.mass);
+    const mass = configuredMass ?? Math.max(MIN_BODY_MASS_KG, Number((node.volume * DEFAULT_BLOCK_MASS_KG).toFixed(3)));
+    const inertia = mass * Math.max(0.5, (node.maxRadiusSq || 1) * 0.4);
+
+    const body = this.rigidBodies.get(node.id);
+    if (body) {
+      body.mass = mass;
+      body.inverseInertia = inertia > 1e-9 ? 1 / inertia : 0;
+      body.centerOfMassLocal = centerOfMassLocal;
+    }
+    if (isRoot) {
+      this.mass = mass;
+      this.maxForce = Math.max(80, this.mass * 65);
+      this.maxTorque = Math.max(40, this.maxForce * Math.max(0.75, this.boundingRadius));
     }
   }
 
@@ -3352,10 +3763,161 @@ export class Contraption {
   }
 
   rebuildAfterBlockChange(type = 'change', nodeId = null, event = null) {
-    this.buildCollisionCells();
-    this.calculateBoundsAndCenter();
-    this.voxelVolume = this.blocks.reduce((sum, block) => sum + Math.pow(block.size || 1, 3), 0);
-    this.rebuildEntityHierarchy();
+    const targetNodeId = String(nodeId || this.rootComponentId);
+
+    const hasHierarchyChange = type === 'install' ||
+      !this.entityNodes ||
+      (this.childDefinitions.size !== (this.entityNodes ? this.entityNodes.size - 1 : 0));
+    if (hasHierarchyChange) {
+      this.buildCollisionCells();
+      this.calculateBoundsAndCenter();
+      this.voxelVolume = this.blocks.reduce((sum, block) => sum + Math.pow(block.size || 1, 3), 0);
+      this.rebuildEntityHierarchy();
+      this.createHighlightBox();
+      if (this.selectedNodeId) {
+        this.setHighlightedNode(this.selectedNodeId);
+      }
+      this.notifyBlocksChanged(type, nodeId, event);
+      return;
+    }
+
+    // Fast path: Color change only
+    if (type === 'color') {
+      const targetNode = this.entityNodes.get(targetNodeId) || this.entityNodes.get(this.rootComponentId);
+      if (targetNode) {
+        const dirtyChunks = new Set<string>();
+        if (event?.cell) {
+          const [cx, cy, cz] = event.cell;
+          dirtyChunks.add(`${Math.floor(cx / 8)},${Math.floor(cy / 8)},${Math.floor(cz / 8)}`);
+        } else {
+          for (const key of targetNode.voxelChunks?.keys() || []) dirtyChunks.add(key);
+        }
+        this.updateNodeChunkMeshes(targetNode, dirtyChunks);
+      }
+      this.notifyBlocksChanged(type, nodeId, event);
+      return;
+    }
+
+    // Determine added and removed blocks
+    let addedBlocks: any[] = [];
+    let removedBlocks: any[] = [];
+    if (this.lastBlocksSet) {
+      if (this.blocks.length === this.lastBlocksSet.size + 1) {
+        const lastB = this.blocks[this.blocks.length - 1];
+        if (lastB && !this.lastBlocksSet.has(lastB)) {
+          addedBlocks.push(lastB);
+          this.lastBlocksSet.add(lastB);
+        }
+      } else if (this.blocks.length === this.lastBlocksSet.size - 1 && event?.cell) {
+        const [cx, cy, cz] = event.cell;
+        const bSize = event.size || 1;
+        for (const b of this.lastBlocksSet) {
+          if (Math.abs(b.localX - cx) < 1e-4 && Math.abs(b.localY - cy) < 1e-4 && Math.abs(b.localZ - cz) < 1e-4 &&
+              Math.abs((b.size || 1) - bSize) < 1e-4) {
+            removedBlocks.push(b);
+            this.lastBlocksSet.delete(b);
+            break;
+          }
+        }
+      }
+      if (addedBlocks.length === 0 && removedBlocks.length === 0 && this.blocks.length !== this.lastBlocksSet.size) {
+        const currentSet = new Set(this.blocks);
+        for (const b of this.blocks) {
+          if (!this.lastBlocksSet.has(b)) addedBlocks.push(b);
+        }
+        for (const b of this.lastBlocksSet) {
+          if (!currentSet.has(b)) removedBlocks.push(b);
+        }
+        this.lastBlocksSet = currentSet;
+      }
+    } else {
+      this.lastBlocksSet = new Set(this.blocks);
+    }
+
+    if (addedBlocks.length === 0 && removedBlocks.length === 0 && !this.collisionCellMap) {
+      this.buildCollisionCells();
+    } else if (addedBlocks.length > 0 || removedBlocks.length > 0) {
+      const removedCollisionEntries: any[] = [];
+      for (const b of removedBlocks) {
+        const entId = b.entityId || this.rootComponentId;
+        const span = Math.max(1, Math.round((b.size || 1) / MICRO_SIZE));
+        const x = Math.floor(b.localX / MICRO_SIZE + 1e-6);
+        const y = Math.floor(b.localY / MICRO_SIZE + 1e-6);
+        const z = Math.floor(b.localZ / MICRO_SIZE + 1e-6);
+        const entryKey = `${entId}:${x},${y},${z}:${span}`;
+        const entry = this.collisionEntryMap?.get(entryKey);
+        if (entry) removedCollisionEntries.push({ entry, entityId: entId });
+      }
+
+      this.updateCollisionIncremental(addedBlocks, removedBlocks);
+
+      if (this.collisionVoxelIndexes) {
+        for (const b of addedBlocks) {
+          const entId = b.entityId || this.rootComponentId;
+          const span = Math.max(1, Math.round((b.size || 1) / MICRO_SIZE));
+          const x = Math.floor(b.localX / MICRO_SIZE + 1e-6);
+          const y = Math.floor(b.localY / MICRO_SIZE + 1e-6);
+          const z = Math.floor(b.localZ / MICRO_SIZE + 1e-6);
+          const entryKey = `${entId}:${x},${y},${z}:${span}`;
+          const entry = this.collisionEntryMap?.get(entryKey);
+          const idx = this.collisionVoxelIndexes.indexes?.get(entId);
+          if (idx && entry) idx.add(entry, x * MICRO_SIZE, y * MICRO_SIZE, z * MICRO_SIZE, span * MICRO_SIZE);
+        }
+        for (const { entry, entityId: entId } of removedCollisionEntries) {
+          const idx = this.collisionVoxelIndexes.indexes?.get(entId);
+          if (idx) idx.remove(entry);
+        }
+        this.collisionVoxelIndexes.shape = this.collisionCellMap;
+      }
+      if (this.pickingVoxelIndexes) {
+        for (const b of addedBlocks) {
+          const entId = b.entityId || this.rootComponentId;
+          const idx = this.pickingVoxelIndexes.indexes?.get(entId);
+          if (idx) idx.add(b, b.localX, b.localY, b.localZ, b.size || 1);
+        }
+        for (const b of removedBlocks) {
+          const entId = b.entityId || this.rootComponentId;
+          const idx = this.pickingVoxelIndexes.indexes?.get(entId);
+          if (idx) idx.remove(b);
+        }
+        this.pickingVoxelIndexes.shape = this.collisionCellMap;
+      }
+    }
+
+    this.updateBoundsIncremental(addedBlocks, removedBlocks);
+    for (const b of addedBlocks) this.voxelVolume += Math.pow(b.size || 1, 3);
+    for (const b of removedBlocks) this.voxelVolume = Math.max(0, this.voxelVolume - Math.pow(b.size || 1, 3));
+
+    const affectedNodeIds = new Set<string>();
+    for (const b of addedBlocks) affectedNodeIds.add(b.entityId || this.rootComponentId);
+    for (const b of removedBlocks) affectedNodeIds.add(b.entityId || this.rootComponentId);
+    if (nodeId) affectedNodeIds.add(nodeId);
+    if (affectedNodeIds.size === 0) affectedNodeIds.add(this.rootComponentId);
+
+    for (const affId of affectedNodeIds) {
+      const node = this.entityNodes?.get(affId);
+      if (!node) continue;
+      const dirtyChunkKeys = new Set<string>();
+      for (const b of [...addedBlocks, ...removedBlocks]) {
+        if ((b.entityId || this.rootComponentId) === node.id) {
+          const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
+          dirtyChunkKeys.add(ck);
+          const bSize = b.size || 1;
+          for (const [dx, dy, dz] of [[-bSize, 0, 0], [bSize, 0, 0], [0, -bSize, 0], [0, bSize, 0], [0, 0, -bSize], [0, 0, bSize]]) {
+            const nck = `${Math.floor((b.localX + dx) / 8)},${Math.floor((b.localY + dy) / 8)},${Math.floor((b.localZ + dz) / 8)}`;
+            if (nck !== ck) dirtyChunkKeys.add(nck);
+          }
+        }
+      }
+      if (dirtyChunkKeys.size === 0) {
+        for (const key of node.voxelChunks?.keys() || []) dirtyChunkKeys.add(key);
+      }
+      this.updateNodeChunkMeshes(node, dirtyChunkKeys, addedBlocks, removedBlocks);
+      this.updateNodeRigidBody(node.id, addedBlocks, removedBlocks);
+    }
+
+    this.updateTransform();
+
     if (this.scriptStatus !== 'running') {
       this.appliedForces.set(0, 0, 0);
       this.appliedTorques.set(0, 0, 0);
@@ -3363,13 +3925,12 @@ export class Contraption {
         if (node.parentId !== null) node.localAngularVelocity.set(0, 0, 0);
       }
     }
-    this.createHighlightBox();
+    if (this.isHighlighted || this.highlightBox) {
+      this.createHighlightBox();
+    }
     if (this.selectedNodeId) {
       this.setHighlightedNode(this.selectedNodeId);
     }
-    // Block-change events fire even when bounds do not change, including color edits.
-    // Scripts query them through ctx.blocks.pressed()/event(), mirroring ctx.input.
-    // Pivots do not follow bounds automatically; use getBounds then setPivot when needed.
     this.notifyBlocksChanged(type, nodeId, event);
   }
 
@@ -3704,7 +4265,7 @@ export class Contraption {
     }
   }
 
-  createVoxelMesh(blocks, coordinateOrigin, parentGroup) {
+  createVoxelMesh(blocks, coordinateOrigin, parentGroup, externalMeshCellMap: Map<string, any> | null = null) {
     if (blocks.length === 0) return null;
     const positions = [];
     const normals = [];
@@ -3719,11 +4280,13 @@ export class Contraption {
       { dir: [1, 0, 0], norm: [1, 0, 0], quad: [[1, 1, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]], face: 'side' }
     ];
 
-    const meshCellMap = new Map();
     const meshKey = (x, y, z, size) => `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`;
-    for (const b of blocks) {
-      const size = b.size || 1;
-      meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+    const meshCellMap = externalMeshCellMap || new Map();
+    if (!externalMeshCellMap) {
+      for (const b of blocks) {
+        const size = b.size || 1;
+        meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+      }
     }
 
     const tempColor = new THREE.Color();
@@ -3787,6 +4350,88 @@ export class Contraption {
     return null;
   }
 
+  buildNodeChunkMeshes(node: any) {
+    if (!node.voxelChunkGroup) {
+      node.voxelChunkGroup = new THREE.Group();
+      node.voxelChunkGroup.name = 'VoxelChunks';
+      node.group.add(node.voxelChunkGroup);
+    }
+    if (node.voxelChunks) {
+      for (const mesh of node.voxelChunks.values()) {
+        node.voxelChunkGroup.remove(mesh);
+        mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) mesh.material.forEach((m: any) => m.dispose());
+        else mesh.material.dispose();
+      }
+    }
+    node.voxelChunks = new Map<string, THREE.Mesh>();
+    node.meshCellMap = new Map<string, any>();
+    node.voxelChunkBlocks = new Map<string, Set<any>>();
+
+    const nodeBlocks = this.blocks.filter(b => (b.entityId || this.rootComponentId) === node.id);
+    const meshKey = (x: number, y: number, z: number, size: number) => (
+      `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`
+    );
+    for (const b of nodeBlocks) {
+      const size = b.size || 1;
+      node.meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+      const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
+      let cSet = node.voxelChunkBlocks.get(ck);
+      if (!cSet) node.voxelChunkBlocks.set(ck, cSet = new Set());
+      cSet.add(b);
+    }
+
+    for (const [ck, cSet] of node.voxelChunkBlocks) {
+      const mesh = this.createVoxelMesh(Array.from(cSet), node.pivotLocal, node.voxelChunkGroup, node.meshCellMap);
+      if (mesh) node.voxelChunks.set(ck, mesh);
+    }
+  }
+
+  updateNodeChunkMeshes(node: any, dirtyChunkKeys: Set<string>, addedBlocks: any[] = [], removedBlocks: any[] = []) {
+    if (!node.voxelChunkGroup || !node.voxelChunkBlocks || !node.meshCellMap) {
+      this.buildNodeChunkMeshes(node);
+      return;
+    }
+    const meshKey = (x: number, y: number, z: number, size: number) => (
+      `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`
+    );
+
+    for (const b of removedBlocks) {
+      if ((b.entityId || this.rootComponentId) === node.id) {
+        const size = b.size || 1;
+        node.meshCellMap.delete(meshKey(b.localX, b.localY, b.localZ, size));
+        const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
+        node.voxelChunkBlocks.get(ck)?.delete(b);
+      }
+    }
+    for (const b of addedBlocks) {
+      if ((b.entityId || this.rootComponentId) === node.id) {
+        const size = b.size || 1;
+        node.meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+        const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
+        let cSet = node.voxelChunkBlocks.get(ck);
+        if (!cSet) node.voxelChunkBlocks.set(ck, cSet = new Set());
+        cSet.add(b);
+      }
+    }
+
+    for (const ck of dirtyChunkKeys) {
+      const cSet = node.voxelChunkBlocks.get(ck);
+      const existingMesh = node.voxelChunks?.get(ck);
+      if (existingMesh) {
+        node.voxelChunkGroup.remove(existingMesh);
+        existingMesh.geometry.dispose();
+        if (Array.isArray(existingMesh.material)) existingMesh.material.forEach((m: any) => m.dispose());
+        else existingMesh.material.dispose();
+        node.voxelChunks?.delete(ck);
+      }
+      if (cSet && cSet.size > 0) {
+        const mesh = this.createVoxelMesh(Array.from(cSet), node.pivotLocal, node.voxelChunkGroup, node.meshCellMap);
+        if (mesh) node.voxelChunks?.set(ck, mesh);
+      }
+    }
+  }
+
   createHighlightBox() {
     const wasVisible = this.isHighlighted || (this.highlightBox?.material?.opacity > 0);
     if (this.highlightBox) {
@@ -3804,14 +4449,10 @@ export class Contraption {
     );
     const boxOffset = currentCenter.sub(this.localCenter);
 
-    const segX = Math.max(1, Math.min(64, Math.round(this.size.x)));
-    const segY = Math.max(1, Math.min(64, Math.round(this.size.y)));
-    const segZ = Math.max(1, Math.min(64, Math.round(this.size.z)));
     const geo = new THREE.BoxGeometry(
       Math.max(0.1, this.size.x),
       Math.max(0.1, this.size.y),
-      Math.max(0.1, this.size.z),
-      segX, segY, segZ
+      Math.max(0.1, this.size.z)
     );
     const edges = new THREE.EdgesGeometry(geo);
     const mat = new THREE.LineBasicMaterial({
@@ -4874,9 +5515,9 @@ export class Contraption {
   private queryIndexedVoxels(collision, intersects) {
     const field = collision ? 'collisionVoxelIndexes' : 'pickingVoxelIndexes';
     let cached = this[field];
-    if (cached?.shape !== this.collisionEntries) {
+    if (cached?.shape !== this.collisionCellMap) {
       cached = this[field] = {
-        shape: this.collisionEntries,
+        shape: this.collisionCellMap,
         indexes: buildEntityVoxelIndexes(collision ? this.collisionEntries : this.blocks,
           this.rootComponentId, collision),
       };
