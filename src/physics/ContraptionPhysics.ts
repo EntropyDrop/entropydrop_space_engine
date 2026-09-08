@@ -1406,10 +1406,12 @@ export class ContraptionPhysics {
     return boxes;
   }
 
-  exactTerrainContacts(contraption, body) {
+  exactTerrainContacts(contraption, body, cachedObbs = null, cachedTerrainBoxes = null) {
     const contacts = [];
-    for (const obb of this.getBodyCollisionWorldOBBs(contraption, body)) {
-      for (const terrainBox of this.terrainBoxesOverlapping(obb)) {
+    const obbs = cachedObbs || this.getBodyCollisionWorldOBBs(contraption, body);
+    for (const obb of obbs) {
+      const terrainBoxes = cachedTerrainBoxes?.get(obb) || this.terrainBoxesOverlapping(obb);
+      for (const terrainBox of terrainBoxes) {
         const contact = this.orientedBoxAabbContact(obb, terrainBox);
         if (!contact) continue;
         // A diagonal SAT normal selects a terrain edge or vertex. It is only a
@@ -1831,8 +1833,10 @@ export class ContraptionPhysics {
     // attached to it: after a child component is split off, the child's cells
     // still move with the body (scene-graph parent), so they must keep the
     // structure supported instead of silently losing that ground contact.
+    const bodyObbs = this.getBodyCollisionWorldOBBs(contraption, body);
     const samplePoints = contraption.getCollisionSamplePoints(body.id, true);
-    const contacts = new Map();
+    if (!bodyObbs.length && !samplePoints.length) return 0;
+
     const translationDistance = previousPose
       ? body.position.distanceTo(previousPose.position)
       : 0;
@@ -1842,6 +1846,24 @@ export class ContraptionPhysics {
     const shouldSweep = translationDistance + rotationDistance >= TERRAIN_SWEEP_THRESHOLD;
     const inverseCurrentQuaternion = previousPose ? body.quaternion.clone().invert() : null;
 
+    // Fast elevation & terrain bounding envelope query across all OBBs for this body
+    let hasNearbyTerrain = false;
+    let maxTerrainY = -Infinity;
+    let minTerrainY = Infinity;
+    const cachedTerrainBoxes = new Map();
+    for (const obb of bodyObbs) {
+      const tBoxes = this.terrainBoxesOverlapping(obb);
+      cachedTerrainBoxes.set(obb, tBoxes);
+      if (tBoxes.length > 0) {
+        hasNearbyTerrain = true;
+        for (const tb of tBoxes) {
+          if (tb.maxY > maxTerrainY) maxTerrainY = tb.maxY;
+          if (tb.minY < minTerrainY) minTerrainY = tb.minY;
+        }
+      }
+    }
+
+    const contacts = new Map();
     const addContact = (resolvedContact, point) => {
       const key = [resolvedContact.normal.x, resolvedContact.normal.y, resolvedContact.normal.z]
         .map(value => value.toFixed(5))
@@ -1860,8 +1882,18 @@ export class ContraptionPhysics {
       contacts.set(key, group);
     };
 
+    const maxTravelDown = previousPose ? Math.max(0, body.position.y - previousPose.position.y) + rotationDistance : 0;
+    const maxTravelUp = previousPose ? Math.max(0, previousPose.position.y - body.position.y) + rotationDistance : 0;
+
     for (let index = 0; index < samplePoints.length; index++) {
       const pt = samplePoints[index];
+      // Early height cull: when terrain is present, skip points that are well above the highest
+      // terrain elevation (or below lowest) in the body's local swept envelope.
+      if (hasNearbyTerrain) {
+        if (pt.y - maxTravelDown > maxTerrainY + 0.02) continue;
+        if (pt.y + maxTravelUp < minTerrainY - 0.02) continue;
+      }
+
       const previousPoint = previousPose
         ? pt.clone()
           .sub(body.position)
@@ -1895,7 +1927,7 @@ export class ContraptionPhysics {
     // non-empty sampled manifold, because a few shallow point contacts do not
     // constrain a different edge that is already entering the face.
     const sampledNormals = [...contacts.values()].map(group => group.normal);
-    for (const exactContact of this.exactTerrainContacts(contraption, body)) {
+    for (const exactContact of this.exactTerrainContacts(contraption, body, bodyObbs, cachedTerrainBoxes)) {
       if (exactContact.penetration <= EXACT_TERRAIN_CONTACT_SLOP) continue;
       const terrainFeatureDimensions = ['x', 'y', 'z'].filter(axis => (
         Math.abs(exactContact.normal[axis]) > 1e-6

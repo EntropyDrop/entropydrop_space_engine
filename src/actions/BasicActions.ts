@@ -265,6 +265,40 @@ function executeWorldAction(context: any, command: any) {
         micro: microCount
       });
     }
+    case 'paint-cells': {
+      const cells = Array.isArray(command.cells) ? command.cells.map(item => finiteCell(item, true)).filter(Boolean) : [];
+      const color = resolveColor(command.options ?? command.color);
+      let standard = 0;
+      let microCount = 0;
+      for (const item of cells) {
+        if (world.getBlock?.(item.x, item.y, item.z) !== BlockTypes.AIR) {
+          if (world.setBlockColor?.(item.x, item.y, item.z, color)) {
+            standard++;
+          }
+        }
+        for (let dx = 0; dx < MICRO_DIVISIONS; dx++) {
+          for (let dy = 0; dy < MICRO_DIVISIONS; dy++) {
+            for (let dz = 0; dz < MICRO_DIVISIONS; dz++) {
+              const mx = item.x * MICRO_DIVISIONS + dx;
+              const my = item.y * MICRO_DIVISIONS + dy;
+              const mz = item.z * MICRO_DIVISIONS + dz;
+              if (world.getMicroBlock?.(mx, my, mz)) {
+                if (world.setMicroBlock?.(mx, my, mz, color)) {
+                  microCount++;
+                }
+              }
+            }
+          }
+        }
+      }
+      const painted = standard + microCount;
+      return actionResult(command.action, painted, painted ? 'painted' : 'not_found', {
+        painted,
+        standard,
+        micro: microCount,
+        color
+      });
+    }
     default:
       return actionResult(command.action, 0, 'unsupported_action');
   }
@@ -524,6 +558,22 @@ function executeEntityAction(context: any, command: any) {
         color: original.color
       }));
       return actionResult(command.action, 125, 'subdivided', { subdivided: 125, removed, empty: false });
+    }
+    case 'paint-blocks': {
+      const selectedBlocks = Array.isArray(command.blocks) ? command.blocks : [];
+      if (selectedBlocks.length === 0) return actionResult(command.action, 0, 'not_found', { painted: 0 });
+      const color = resolveColor(command.options ?? command.color);
+      let painted = 0;
+      for (const block of selectedBlocks) {
+        block.color = color;
+        painted++;
+      }
+      if (painted > 0) {
+        finishEntityMutation(context, contraption, 'color', nodeId, entityMutationEvent(command, {
+          color
+        }));
+      }
+      return actionResult(command.action, painted, painted ? 'painted' : 'not_found', { painted, color });
     }
     case 'remove-blocks': {
       const selectedBlocks = Array.isArray(command.blocks) ? command.blocks : [];
@@ -1113,6 +1163,119 @@ function executeSelectionAction(context: any, command: any) {
       const result = executeWorldAction(context, { action: 'remove-cells', cells });
       manager.clearSelection?.();
       return result;
+    }
+    case 'paint': {
+      const color = resolveColor(command.options ?? command.color);
+      const selected = command.selection || owner.entitySelection;
+      if (selected?.kind === 'entity-subtree' && selected?.contraption) {
+        const nodeId = requestedNodeId(selected.contraption, selected.nodeId, selected.rootId);
+        if (nodeId !== entityRootId(selected.contraption) && !canEditInternalSelection(selected.contraption)) {
+          invalidateInternalEntitySelections(context, selected.contraption);
+          return actionResult(command.action, 0, 'entity_not_stopped', { painted: 0 });
+        }
+        const nodeIds = selected.contraption.collectSubtreeNodeIds?.(nodeId) || new Set([nodeId]);
+        const blocks = selected.contraption.blocks.filter(block => nodeIds.has(blockOwnerId(selected.contraption, block)));
+        return executeEntityAction(context, {
+          action: 'paint-blocks',
+          target: { contraption: selected.contraption },
+          nodeId,
+          blocks,
+          color,
+          actor: command.actor
+        });
+      }
+      if (selected?.kind === 'entity-blocks' || (selected?.contraption && Array.isArray(selected?.blocks))) {
+        if (!canEditInternalSelection(selected.contraption)) {
+          invalidateInternalEntitySelections(context, selected.contraption);
+          return actionResult(command.action, 0, 'entity_not_stopped', { painted: 0 });
+        }
+        return executeEntityAction(context, {
+          action: 'paint-blocks',
+          target: { contraption: selected.contraption },
+          nodeId: selected.nodeId,
+          blocks: selected.blocks,
+          color,
+          actor: command.actor
+        });
+      }
+      if (!manager?.hasValidSelection?.()) return actionResult(command.action, 0, 'no_selection', { painted: 0 });
+      if (manager.microSelection !== null) {
+        const world = context?.world;
+        const subdividedStandardCells = new Set<string>();
+        for (const cell of manager.microSelection) {
+          const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+          const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+          const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+          const cellKey = `${wx},${wy},${wz}`;
+          if (!subdividedStandardCells.has(cellKey)) {
+            if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
+              world.subdivideBlock?.(wx, wy, wz);
+            }
+            subdividedStandardCells.add(cellKey);
+          }
+        }
+        let paintedMicro = 0;
+        for (const cell of manager.microSelection) {
+          if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+          if (executeWorldAction(context, { action: 'paint-micro', micro: cell, color }).painted) {
+            paintedMicro++;
+          }
+        }
+        return actionResult(command.action, paintedMicro, paintedMicro ? 'painted' : 'not_found', {
+          painted: paintedMicro,
+          standard: 0,
+          micro: paintedMicro,
+          color
+        });
+      }
+      const bounds = manager.getSelectionBounds?.();
+      const cells = manager.connectedSelection !== null
+        ? [...(manager.connectedSelection || [])]
+        : bounds
+          ? (() => {
+              const result: any[] = [];
+              for (let x = bounds.minX; x <= bounds.maxX; x++) {
+                for (let y = bounds.minY; y <= bounds.maxY; y++) {
+                  for (let z = bounds.minZ; z <= bounds.maxZ; z++) result.push({ x, y, z });
+                }
+              }
+              return result;
+            })()
+          : [];
+      const worldResult = executeWorldAction(context, { action: 'paint-cells', cells, color });
+      let totalPainted = worldResult.painted || 0;
+      if (bounds && Array.isArray(manager?.contraptions)) {
+        for (const c of manager.contraptions) {
+          if (!canEditInternalSelection(c) || !Array.isArray(c.blocks)) continue;
+          const insideBlocks: any[] = [];
+          for (const block of c.blocks) {
+            const worldPos = c.entityLocalToWorld?.(
+              blockOwnerId(c, block),
+              new THREE.Vector3(block.localX + 0.5 * (block.size || 1), block.localY + 0.5 * (block.size || 1), block.localZ + 0.5 * (block.size || 1))
+            );
+            if (worldPos && worldPos.x >= bounds.minX && worldPos.x <= bounds.maxX + 1
+              && worldPos.y >= bounds.minY && worldPos.y <= bounds.maxY + 1
+              && worldPos.z >= bounds.minZ && worldPos.z <= bounds.maxZ + 1) {
+              insideBlocks.push(block);
+            }
+          }
+          if (insideBlocks.length > 0) {
+            const entityPaint = executeEntityAction(context, {
+              action: 'paint-blocks',
+              target: { contraption: c },
+              nodeId: entityRootId(c),
+              blocks: insideBlocks,
+              color,
+              actor: command.actor
+            });
+            totalPainted += entityPaint.painted || 0;
+          }
+        }
+      }
+      return actionResult(command.action, totalPainted, totalPainted ? 'painted' : 'not_found', {
+        painted: totalPainted,
+        color
+      });
     }
     case 'assemble': {
       const mode = manager?.normalizeAssemblyMode?.(command.mode);

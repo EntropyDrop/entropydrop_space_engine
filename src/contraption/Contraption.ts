@@ -4645,15 +4645,25 @@ export class Contraption {
       return transform;
     };
 
-    for (const cell of this.collisionSurfaceEntries || this.collisionEntries) {
+    const hasMicro = (this.collisionSurfaceEntries || this.collisionEntries || []).some(
+      (cell: any) => (cell.span ?? 5) < 5
+    );
+    const sourceEntries: any[] = hasMicro && this.collisionTerrainBoxes?.length
+      ? this.collisionTerrainBoxes
+      : (this.collisionSurfaceEntries || this.collisionEntries);
+
+    for (const cell of sourceEntries) {
       if (bodyId && cell.entityId !== bodyId && (!attached || !attached.has(cell.entityId))) continue;
       if (!this.isNodeCollisionEnabled(cell.entityId)) continue;
       const transform = transformFor(cell.entityId);
       // Box corners in flat entity-local space, inset one millimetre so the
       // samples stay strictly inside the 0.2-quantized collision box.
-      const sx = cell.span * MICRO_SIZE;
-      const sy = cell.span * MICRO_SIZE;
-      const sz = cell.span * MICRO_SIZE;
+      const spanX = cell.spanX ?? cell.span;
+      const spanY = cell.spanY ?? cell.span;
+      const spanZ = cell.spanZ ?? cell.span;
+      const sx = spanX * MICRO_SIZE;
+      const sy = spanY * MICRO_SIZE;
+      const sz = spanZ * MICRO_SIZE;
       const x0 = cell.x * MICRO_SIZE, y0 = cell.y * MICRO_SIZE, z0 = cell.z * MICRO_SIZE;
       // Point probes provide the swept contact manifold; exact OBB-vs-terrain
       // SAT in ContraptionPhysics covers face-edge and edge-edge intersections
@@ -4672,18 +4682,61 @@ export class Contraption {
           }
         }
       }
-      // The two Y-face centres stabilize broad floor/ceiling contact without
-      // biasing a wall manifold toward the bottom of the body. Keeping the
-      // pair symmetric also prevents centred wall forces from inventing spin.
-      for (const dy of [low, high]) {
-        const faceCenter = new THREE.Vector3(
-          x0 + 0.5 * sx,
-          y0 + dy * sy,
-          z0 + 0.5 * sz
-        );
-        if (transform) faceCenter.sub(transform.pivot).applyMatrix4(transform.matrix);
-        else faceCenter.copy(this.localToWorld(faceCenter));
-        points.push(faceCenter);
+
+      // If this is a merged box spanning multiple microblocks, adaptively sample
+      // top/bottom faces and edges with ~0.5m spacing so large surfaces don't miss terrain features.
+      const nx = Math.max(1, Math.round(sx / 0.5));
+      const nz = Math.max(1, Math.round(sz / 0.5));
+      if (hasMicro && (nx > 1 || nz > 1)) {
+        for (const dy of [low, high]) {
+          for (let ix = 0; ix <= nx; ix++) {
+            for (let iz = 0; iz <= nz; iz++) {
+              if ((ix === 0 || ix === nx) && (iz === 0 || iz === nz)) continue;
+              const fx = ix === 0 ? low : ix === nx ? high : ix / nx;
+              const fz = iz === 0 ? low : iz === nz ? high : iz / nz;
+              const point = new THREE.Vector3(
+                x0 + fx * sx,
+                y0 + dy * sy,
+                z0 + fz * sz
+              );
+              if (transform) point.sub(transform.pivot).applyMatrix4(transform.matrix);
+              else point.copy(this.localToWorld(point));
+              points.push(point);
+            }
+          }
+        }
+        const ny = Math.max(1, Math.round(sy / 0.5));
+        if (ny > 1) {
+          for (let iy = 1; iy < ny; iy++) {
+            const fy = iy / ny;
+            for (const ix of [low, high]) {
+              for (const iz of [low, high]) {
+                const point = new THREE.Vector3(
+                  x0 + ix * sx,
+                  y0 + fy * sy,
+                  z0 + iz * sz
+                );
+                if (transform) point.sub(transform.pivot).applyMatrix4(transform.matrix);
+                else point.copy(this.localToWorld(point));
+                points.push(point);
+              }
+            }
+          }
+        }
+      } else {
+        // The two Y-face centres stabilize broad floor/ceiling contact without
+        // biasing a wall manifold toward the bottom of the body. Keeping the
+        // pair symmetric also prevents centred wall forces from inventing spin.
+        for (const dy of [low, high]) {
+          const faceCenter = new THREE.Vector3(
+            x0 + 0.5 * sx,
+            y0 + dy * sy,
+            z0 + 0.5 * sz
+          );
+          if (transform) faceCenter.sub(transform.pivot).applyMatrix4(transform.matrix);
+          else faceCenter.copy(this.localToWorld(faceCenter));
+          points.push(faceCenter);
+        }
       }
     }
 
