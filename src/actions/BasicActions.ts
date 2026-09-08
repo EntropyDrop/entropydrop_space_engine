@@ -174,6 +174,9 @@ function executeWorldAction(context: any, command: any) {
       const occupied = (world.getBlock?.(cell.x, cell.y, cell.z) ?? BlockTypes.AIR) !== BlockTypes.AIR
         || !!world.hasMicroInStandardCell?.(cell.x, cell.y, cell.z);
       if (occupied && !command.replace) return actionResult(command.action, 0, 'occupied', { placed: 0 });
+      if (command.replace) {
+        world.microVoxels?.clearCell?.(cell.x, cell.y, cell.z);
+      }
       const result = world.setBlock?.(
         cell.x, cell.y, cell.z,
         command.block || BlockTypes.COLOR_BLOCK,
@@ -1114,33 +1117,66 @@ function executeSelectionAction(context: any, command: any) {
         return result;
       }
       if (!manager?.hasValidSelection?.()) return actionResult(command.action, 0, 'no_selection', { removed: 0 });
-      if (manager.microSelection !== null) {
-        // Sparse micro selection (Selector micro mode): remove exactly the
-        // selected 0.125 m cells that hold a micro voxel.
+      if (manager.microSelection !== null || manager.microBounds) {
         const world = context?.world;
-        const subdividedStandardCells = new Set<string>();
-        for (const cell of manager.microSelection) {
-          const wx = Math.floor(cell.x / MICRO_DIVISIONS);
-          const wy = Math.floor(cell.y / MICRO_DIVISIONS);
-          const wz = Math.floor(cell.z / MICRO_DIVISIONS);
-          const cellKey = `${wx},${wy},${wz}`;
-          if (!subdividedStandardCells.has(cellKey)) {
-            if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
-              world.subdivideBlock?.(wx, wy, wz);
+        const partition = manager.partitionMicroSelection ? manager.partitionMicroSelection() : null;
+        let removedStandard = 0;
+        let removedMicro = 0;
+
+        if (partition && (partition.standardCells.length > 0 || partition.microCells.length > 0)) {
+          // 1. Process merged standard cells directly without subdivision
+          for (const cell of partition.standardCells) {
+            const res = executeWorldAction(context, { action: 'clear-cell', cell });
+            removedStandard += res.standard || 0;
+            removedMicro += res.micro || 0;
+          }
+
+          // 2. Subdivide partially covered cells and remove targeted micro cells
+          const partialCells = new Set<string>();
+          for (const cell of partition.microCells) {
+            const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+            const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+            const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+            const cellKey = `${wx},${wy},${wz}`;
+            if (!partialCells.has(cellKey)) {
+              if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
+                world.subdivideBlock?.(wx, wy, wz);
+              }
+              partialCells.add(cellKey);
             }
-            subdividedStandardCells.add(cellKey);
+          }
+
+          for (const cell of partition.microCells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            removedMicro += executeWorldAction(context, { action: 'remove-micro', micro: cell }).removed || 0;
+          }
+        } else {
+          // Fallback if no partition available
+          const cells = manager.microSelection || [];
+          const subdividedStandardCells = new Set<string>();
+          for (const cell of cells) {
+            const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+            const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+            const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+            const cellKey = `${wx},${wy},${wz}`;
+            if (!subdividedStandardCells.has(cellKey)) {
+              if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
+                world.subdivideBlock?.(wx, wy, wz);
+              }
+              subdividedStandardCells.add(cellKey);
+            }
+          }
+          for (const cell of cells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            removedMicro += executeWorldAction(context, { action: 'remove-micro', micro: cell }).removed || 0;
           }
         }
 
-        let removedMicro = 0;
-        for (const cell of manager.microSelection) {
-          if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
-          removedMicro += executeWorldAction(context, { action: 'remove-micro', micro: cell }).removed || 0;
-        }
         manager.clearSelection?.();
-        return actionResult(command.action, removedMicro, removedMicro ? 'removed' : 'not_found', {
-          removed: removedMicro,
-          standard: 0,
+        const totalRemoved = removedStandard + removedMicro;
+        return actionResult(command.action, totalRemoved, totalRemoved ? 'removed' : 'not_found', {
+          removed: totalRemoved,
+          standard: removedStandard,
           micro: removedMicro,
           entities: 0,
           components: 0
@@ -1166,6 +1202,9 @@ function executeSelectionAction(context: any, command: any) {
     }
     case 'paint': {
       const color = resolveColor(command.options ?? command.color);
+      const fromColor = command.options?.fromColor !== undefined || command.fromColor !== undefined
+        ? resolveColor(command.options?.fromColor ?? command.fromColor)
+        : null;
       const selected = command.selection || owner.entitySelection;
       if (selected?.kind === 'entity-subtree' && selected?.contraption) {
         const nodeId = requestedNodeId(selected.contraption, selected.nodeId, selected.rootId);
@@ -1199,31 +1238,103 @@ function executeSelectionAction(context: any, command: any) {
         });
       }
       if (!manager?.hasValidSelection?.()) return actionResult(command.action, 0, 'no_selection', { painted: 0 });
-      if (manager.microSelection !== null) {
+      if (manager.microSelection !== null || manager.microBounds) {
         const world = context?.world;
-        const subdividedStandardCells = new Set<string>();
-        for (const cell of manager.microSelection) {
-          const wx = Math.floor(cell.x / MICRO_DIVISIONS);
-          const wy = Math.floor(cell.y / MICRO_DIVISIONS);
-          const wz = Math.floor(cell.z / MICRO_DIVISIONS);
-          const cellKey = `${wx},${wy},${wz}`;
-          if (!subdividedStandardCells.has(cellKey)) {
-            if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
-              world.subdivideBlock?.(wx, wy, wz);
-            }
-            subdividedStandardCells.add(cellKey);
-          }
-        }
+        const partition = manager.partitionMicroSelection ? manager.partitionMicroSelection() : null;
+        let paintedStandard = 0;
         let paintedMicro = 0;
-        for (const cell of manager.microSelection) {
-          if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
-          if (executeWorldAction(context, { action: 'paint-micro', micro: cell, color }).painted) {
-            paintedMicro++;
+
+        if (partition && (partition.standardCells.length > 0 || partition.microCells.length > 0)) {
+          // 1. Process merged standard cells
+          for (const cell of partition.standardCells) {
+            if (world?.getBlock && world.getBlock(cell.x, cell.y, cell.z) !== BlockTypes.AIR) {
+              const currentColor = world.getBlockColor ? world.getBlockColor(cell.x, cell.y, cell.z) : null;
+              if (fromColor === null || currentColor === fromColor) {
+                if (executeWorldAction(context, { action: 'paint-standard', cell, color }).painted) {
+                  paintedStandard++;
+                }
+              }
+            } else if (world?.microVoxels?.hasAnyInStandardCell?.(cell.x, cell.y, cell.z)) {
+              let cellCount = 0;
+              let matchCount = 0;
+              const baseX = cell.x * MICRO_DIVISIONS;
+              const baseY = cell.y * MICRO_DIVISIONS;
+              const baseZ = cell.z * MICRO_DIVISIONS;
+              for (let dx = 0; dx < MICRO_DIVISIONS; dx++) {
+                for (let dy = 0; dy < MICRO_DIVISIONS; dy++) {
+                  for (let dz = 0; dz < MICRO_DIVISIONS; dz++) {
+                    const mBlock = world.getMicroBlock?.(baseX + dx, baseY + dy, baseZ + dz);
+                    if (mBlock) {
+                      cellCount++;
+                      if (fromColor === null || mBlock.color === fromColor) matchCount++;
+                    }
+                  }
+                }
+              }
+              if (cellCount === MICRO_DIVISIONS ** 3 && matchCount === cellCount) {
+                // All 512 microblocks match: coalesce directly into 1 standard block!
+                world.clearMicroStandardCell?.(cell.x, cell.y, cell.z);
+                world.setBlock?.(cell.x, cell.y, cell.z, BlockTypes.COLOR_BLOCK, true, color);
+                paintedStandard++;
+              } else {
+                for (let dx = 0; dx < MICRO_DIVISIONS; dx++) {
+                  for (let dy = 0; dy < MICRO_DIVISIONS; dy++) {
+                    for (let dz = 0; dz < MICRO_DIVISIONS; dz++) {
+                      const mx = baseX + dx;
+                      const my = baseY + dy;
+                      const mz = baseZ + dz;
+                      const mBlock = world.getMicroBlock?.(mx, my, mz);
+                      if (mBlock && (fromColor === null || mBlock.color === fromColor)) {
+                        if (executeWorldAction(context, { action: 'paint-micro', micro: { x: mx, y: my, z: mz }, color }).painted) {
+                          paintedMicro++;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // 2. Process boundary / residual micro cells
+          const partialCells = new Set<string>();
+          for (const cell of partition.microCells) {
+            const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+            const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+            const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+            const cellKey = `${wx},${wy},${wz}`;
+            if (!partialCells.has(cellKey)) {
+              if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
+                world.subdivideBlock?.(wx, wy, wz);
+              }
+              partialCells.add(cellKey);
+            }
+          }
+
+          for (const cell of partition.microCells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            const mBlock = world?.getMicroBlock?.(cell.x, cell.y, cell.z);
+            if (mBlock && (fromColor === null || mBlock.color === fromColor)) {
+              if (executeWorldAction(context, { action: 'paint-micro', micro: cell, color }).painted) {
+                paintedMicro++;
+              }
+            }
+          }
+        } else {
+          // Fallback
+          const cells = manager.microSelection || [];
+          for (const cell of cells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            if (executeWorldAction(context, { action: 'paint-micro', micro: cell, color }).painted) {
+              paintedMicro++;
+            }
           }
         }
-        return actionResult(command.action, paintedMicro, paintedMicro ? 'painted' : 'not_found', {
-          painted: paintedMicro,
-          standard: 0,
+
+        const totalPainted = paintedStandard + paintedMicro;
+        return actionResult(command.action, totalPainted, totalPainted ? 'painted' : 'not_found', {
+          painted: totalPainted,
+          standard: paintedStandard,
           micro: paintedMicro,
           color
         });
@@ -1274,6 +1385,99 @@ function executeSelectionAction(context: any, command: any) {
       }
       return actionResult(command.action, totalPainted, totalPainted ? 'painted' : 'not_found', {
         painted: totalPainted,
+        color
+      });
+    }
+    case 'fill': {
+      const color = resolveColor(command.options ?? command.color);
+      const selected = command.selection || owner.entitySelection;
+      if (selected?.kind === 'entity-blocks' && selected?.contraption) {
+        return executeEntityAction(context, {
+          action: 'paint-blocks',
+          target: { contraption: selected.contraption },
+          nodeId: selected.nodeId,
+          blocks: selected.blocks,
+          color,
+          actor: command.actor
+        });
+      }
+      if (!manager?.hasValidSelection?.()) return actionResult(command.action, 0, 'no_selection', { placed: 0 });
+
+      if (manager.microSelection !== null || manager.microBounds) {
+        const world = context?.world;
+        const partition = manager.partitionMicroSelection ? manager.partitionMicroSelection() : null;
+        let placedStandard = 0;
+        let placedMicro = 0;
+
+        if (partition && (partition.standardCells.length > 0 || partition.microCells.length > 0)) {
+          // 1. Process merged standard cells as solid standard blocks
+          for (const cell of partition.standardCells) {
+            const res = executeWorldAction(context, { action: 'place-standard', cell, color, replace: true });
+            if (res.placed) placedStandard++;
+          }
+
+          // 2. Process boundary microcells
+          const partialCells = new Set<string>();
+          for (const cell of partition.microCells) {
+            const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+            const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+            const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+            const cellKey = `${wx},${wy},${wz}`;
+            if (!partialCells.has(cellKey)) {
+              if (world?.getBlock && world.getBlock(wx, wy, wz) !== BlockTypes.AIR) {
+                world.subdivideBlock?.(wx, wy, wz);
+              }
+              partialCells.add(cellKey);
+            }
+          }
+
+          for (const cell of partition.microCells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            const res = executeWorldAction(context, { action: 'place-micro', micro: cell, color, replace: true });
+            if (res.placed) placedMicro++;
+          }
+        } else {
+          const cells = manager.microSelection || [];
+          for (const cell of cells) {
+            if (cell.y < 0 || cell.y >= CHUNK_SIZE_Y * MICRO_DIVISIONS) continue;
+            const res = executeWorldAction(context, { action: 'place-micro', micro: cell, color, replace: true });
+            if (res.placed) placedMicro++;
+          }
+        }
+
+        const totalPlaced = placedStandard + placedMicro;
+        return actionResult(command.action, totalPlaced, totalPlaced ? 'placed' : 'out_of_bounds', {
+          placed: totalPlaced,
+          standard: placedStandard,
+          micro: placedMicro,
+          color
+        });
+      }
+
+      // Standard box or connected cells fill
+      const bounds = manager.getSelectionBounds?.();
+      const cells = manager.connectedSelection !== null
+        ? [...(manager.connectedSelection || [])]
+        : bounds
+          ? (() => {
+              const result: any[] = [];
+              for (let x = bounds.minX; x <= bounds.maxX; x++) {
+                for (let y = bounds.minY; y <= bounds.maxY; y++) {
+                  for (let z = bounds.minZ; z <= bounds.maxZ; z++) result.push({ x, y, z });
+                }
+              }
+              return result;
+            })()
+          : [];
+      let totalPlaced = 0;
+      for (const cell of cells) {
+        const res = executeWorldAction(context, { action: 'place-standard', cell, color, replace: true });
+        if (res.placed) totalPlaced++;
+      }
+      return actionResult(command.action, totalPlaced, totalPlaced ? 'placed' : 'out_of_bounds', {
+        placed: totalPlaced,
+        standard: totalPlaced,
+        micro: 0,
         color
       });
     }

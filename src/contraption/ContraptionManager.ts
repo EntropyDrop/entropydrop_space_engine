@@ -430,6 +430,26 @@ export class ContraptionManager {
           reason: result.reason
         });
       },
+      paint: (options: any = null) => {
+        const result = runSelection('paint', { options });
+        return Object.freeze({
+          ok: result.ok,
+          painted: result.painted || 0,
+          standard: result.standard || 0,
+          micro: result.micro || 0,
+          reason: result.reason
+        });
+      },
+      fill: (options: any = null) => {
+        const result = runSelection('fill', { options });
+        return Object.freeze({
+          ok: result.ok,
+          placed: result.placed || 0,
+          standard: result.standard || 0,
+          micro: result.micro || 0,
+          reason: result.reason
+        });
+      },
       assemble: (mode = ContraptionMode.PROGRAMMABLE, options = {}) => {
         const result = runSelection('assemble', { mode, options });
         return Object.freeze({
@@ -1456,6 +1476,97 @@ export class ContraptionManager {
     return { minX, minY, minZ, maxX, maxY, maxZ };
   }
 
+  /**
+   * Partition the active micro selection into:
+   * 1. standardCells: regions that completely cover 8x8x8 microcells of a standard block
+   *    and can be processed as full 1.0 m standard blocks to minimize voxel overhead.
+   * 2. microCells: boundary / partial microcells that cannot be merged into a standard block.
+   */
+  partitionMicroSelection(): {
+    standardCells: Array<{ x: number; y: number; z: number }>;
+    microCells: Array<{ x: number; y: number; z: number }>;
+    standardBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null;
+  } {
+    const standardCells: Array<{ x: number; y: number; z: number }> = [];
+    const microCells: Array<{ x: number; y: number; z: number }> = [];
+    let standardBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null = null;
+
+    if (this.microBounds) {
+      const { minX, minY, minZ, maxX, maxY, maxZ } = this.microBounds;
+      const stdMinWx = Math.ceil(minX / MICRO_DIVISIONS);
+      const stdMaxWx = Math.floor((maxX - MICRO_DIVISIONS + 1) / MICRO_DIVISIONS);
+      const stdMinWy = Math.ceil(minY / MICRO_DIVISIONS);
+      const stdMaxWy = Math.floor((maxY - MICRO_DIVISIONS + 1) / MICRO_DIVISIONS);
+      const stdMinWz = Math.ceil(minZ / MICRO_DIVISIONS);
+      const stdMaxWz = Math.floor((maxZ - MICRO_DIVISIONS + 1) / MICRO_DIVISIONS);
+
+      const hasStandardCore = stdMinWx <= stdMaxWx && stdMinWy <= stdMaxWy && stdMinWz <= stdMaxWz;
+      if (hasStandardCore) {
+        standardBounds = {
+          minX: stdMinWx,
+          minY: stdMinWy,
+          minZ: stdMinWz,
+          maxX: stdMaxWx,
+          maxY: stdMaxWy,
+          maxZ: stdMaxWz
+        };
+        for (let x = stdMinWx; x <= stdMaxWx; x++) {
+          for (let y = stdMinWy; y <= stdMaxWy; y++) {
+            for (let z = stdMinWz; z <= stdMaxWz; z++) {
+              standardCells.push({ x, y, z });
+            }
+          }
+        }
+      }
+
+      // Collect all microcells that are outside the standard core
+      for (let x = minX; x <= maxX; x++) {
+        const inCoreX = hasStandardCore && x >= stdMinWx * MICRO_DIVISIONS && x <= (stdMaxWx + 1) * MICRO_DIVISIONS - 1;
+        for (let y = minY; y <= maxY; y++) {
+          const inCoreY = inCoreX && y >= stdMinWy * MICRO_DIVISIONS && y <= (stdMaxWy + 1) * MICRO_DIVISIONS - 1;
+          for (let z = minZ; z <= maxZ; z++) {
+            if (inCoreY && z >= stdMinWz * MICRO_DIVISIONS && z <= (stdMaxWz + 1) * MICRO_DIVISIONS - 1) {
+              z = (stdMaxWz + 1) * MICRO_DIVISIONS - 1;
+              continue;
+            }
+            microCells.push({ x, y, z });
+          }
+        }
+      }
+
+      return { standardCells, microCells, standardBounds };
+    }
+
+    if (Array.isArray(this.microSelection) && this.microSelection.length > 0) {
+      // Group sparse micro cells by their standard cell parent
+      const grouped = new Map<string, Array<{ x: number; y: number; z: number }>>();
+      for (const cell of this.microSelection) {
+        const wx = Math.floor(cell.x / MICRO_DIVISIONS);
+        const wy = Math.floor(cell.y / MICRO_DIVISIONS);
+        const wz = Math.floor(cell.z / MICRO_DIVISIONS);
+        const key = `${wx},${wy},${wz}`;
+        let list = grouped.get(key);
+        if (!list) {
+          list = [];
+          grouped.set(key, list);
+        }
+        list.push(cell);
+      }
+
+      const fullCellCount = MICRO_DIVISIONS ** 3; // 512
+      for (const [key, cells] of grouped) {
+        const [wx, wy, wz] = key.split(',').map(Number);
+        if (cells.length === fullCellCount) {
+          standardCells.push({ x: wx, y: wy, z: wz });
+        } else {
+          microCells.push(...cells);
+        }
+      }
+    }
+
+    return { standardCells, microCells, standardBounds };
+  }
+
   getWorldGlueSelectionInfo(): {
     mode: string;
     granularity: string;
@@ -1614,6 +1725,7 @@ export class ContraptionManager {
 
   hasValidSelection() {
     if (this.childSelection) return this.hasReadyChildSelection();
+    if (this.microBounds !== null) return true;
     if (this.microSelection && this.microSelection.length > 0) return true;
     if (this.connectedSelection && this.connectedSelection.length > 0) return true;
     if (this.gluePoints && this.gluePoints.length === 3) return true;
