@@ -1654,7 +1654,16 @@ export class ContraptionPhysics {
 
     const direction = velocity.clone().normalize();
     const probeDistance = frameDistance + 0.02;
-    const samples = contraption.getCollisionSamplePoints?.(body.id, true) || [];
+    const allSamples = contraption.getCollisionSamplePoints?.(body.id, true) || [];
+    const maxSamples = 48;
+    let samples = allSamples;
+    if (allSamples.length > maxSamples) {
+      const step = Math.ceil(allSamples.length / maxSamples);
+      samples = [];
+      for (let i = 0; i < allSamples.length && samples.length < maxSamples; i += step) {
+        samples.push(allSamples[i]);
+      }
+    }
     const normals: THREE.Vector3[] = [];
     let allowedFraction = 1;
 
