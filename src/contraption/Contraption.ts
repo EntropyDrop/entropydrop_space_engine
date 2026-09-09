@@ -470,6 +470,9 @@ export class Contraption {
   bodyType: string;
   useGravity: boolean;
   collisionEnabled: boolean;
+  /** Entity-level collision simulation switch. When false, collision queries
+   * and shapes are temporarily bypassed during interactive tools (e.g. wrench grab). */
+  collisionSimulationEnabled: boolean;
   /** Entity-level dynamics switch. Stopped entities keep collision/query
    * shapes but do not integrate, solve constraints, or receive impulses. */
   physicsSimulationEnabled: boolean;
@@ -664,6 +667,7 @@ export class Contraption {
       ? !!options.useGravity
       : this.bodyType === BodyType.DYNAMIC;
     this.collisionEnabled = options.collisionEnabled !== false;
+    this.collisionSimulationEnabled = options.collisionSimulationEnabled !== false;
     this.physicsSimulationEnabled = options.physicsSimulationEnabled !== false;
     this.runtimeBodyConfigDefaults = new Map();
     this.isOnGround = false;
@@ -1674,6 +1678,7 @@ export class Contraption {
     this.resetAllComponentState();
     this.scriptStatus = 'stopped';
     this.setPhysicsSimulationEnabled(false);
+    this.setCollisionSimulationEnabled(true);
     this.log('[STOP] Entity physics disabled; component scripts stopped and runtime BodyConfig restored');
     return true;
   }
@@ -1743,6 +1748,21 @@ export class Contraption {
     }
     this.invalidateCollisionPoseCache();
     return next;
+  }
+
+  isCollisionSimulationEnabled() {
+    return this.collisionSimulationEnabled !== false;
+  }
+
+  /**
+   * Temporarily enable or disable collision simulation without mutating
+   * authored per-component collisionEnabled configs. Used during interactive tools (e.g. wrench grab).
+   */
+  setCollisionSimulationEnabled(enabled = true) {
+    const next = enabled !== false;
+    if (this.collisionSimulationEnabled === next) return;
+    this.collisionSimulationEnabled = next;
+    this.invalidateCollisionPoseCache();
   }
 
   /**
@@ -5270,6 +5290,7 @@ export class Contraption {
   /** Collision-disabled components remain editable and rendered but do not
    * become terrain, player, entity, or raycast collision shapes. */
   isNodeCollisionEnabled(nodeId) {
+    if (this.collisionSimulationEnabled === false) return false;
     return this.getNodeCollisionEnabled(nodeId) !== false;
   }
 

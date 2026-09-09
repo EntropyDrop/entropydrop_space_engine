@@ -1650,7 +1650,9 @@ export class ContraptionPhysics {
     const velocity = desiredVelocity?.clone?.() || new THREE.Vector3();
     const safeDt = Math.max(1 / 240, Math.min(0.08, Number(dt) || 0));
     const frameDistance = velocity.length() * safeDt;
-    if (!body || frameDistance < 1e-8) return { velocity, normals: [] };
+    if (!body || frameDistance < 1e-8 || contraption.isCollisionSimulationEnabled?.() === false) {
+      return { velocity, normals: [] };
+    }
 
     const direction = velocity.clone().normalize();
     const probeDistance = frameDistance + 0.02;
