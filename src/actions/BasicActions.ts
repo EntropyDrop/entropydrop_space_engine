@@ -851,14 +851,26 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
     const componentsSet = new Set<string>();
     const blockBounds = new THREE.Box3();
 
+    const isWorldSpace = space === 'world';
+    const baseBox = new THREE.Box3(
+      new THREE.Vector3(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.min(a.z, b.z)),
+      new THREE.Vector3(Math.max(a.x, b.x), Math.max(a.y, b.y), Math.max(a.z, b.z))
+    );
+
     for (const targetNode of contraption.entityNodes.values()) {
       targetNode.group?.updateWorldMatrix?.(true, false);
-      const localA = targetNode.group.worldToLocal(worldA.clone());
-      const localB = targetNode.group.worldToLocal(worldB.clone());
-      const bounds = new THREE.Box3(
-        new THREE.Vector3(Math.min(localA.x, localB.x), Math.min(localA.y, localB.y), Math.min(localA.z, localB.z)),
-        new THREE.Vector3(Math.max(localA.x, localB.x), Math.max(localA.y, localB.y), Math.max(localA.z, localB.z))
-      ).expandByScalar(1e-6);
+      let bounds: THREE.Box3;
+      if (isWorldSpace) {
+        const invTarget = targetNode.group ? targetNode.group.matrixWorld.clone().invert() : new THREE.Matrix4();
+        bounds = baseBox.clone().applyMatrix4(invTarget).expandByScalar(1e-6);
+      } else if (targetNode.id === nodeId) {
+        bounds = baseBox.clone().expandByScalar(1e-6);
+      } else {
+        node.group?.updateWorldMatrix?.(true, false);
+        const invTarget = targetNode.group.matrixWorld.clone().invert();
+        const nodeToTarget = invTarget.multiply(node.group.matrixWorld);
+        bounds = baseBox.clone().applyMatrix4(nodeToTarget).expandByScalar(1e-6);
+      }
       const pivot = targetNode.pivotLocal;
 
       for (const block of contraption.blocks) {
@@ -899,14 +911,13 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
 
   const components: string[] = [];
   if (selected.length === 0 && node.group) {
+    node.group.updateWorldMatrix(true, false);
     for (const other of contraption.entityNodes.values()) {
       if (other.id === nodeId) continue;
-      const otherA = other.group.worldToLocal(worldA.clone());
-      const otherB = other.group.worldToLocal(worldB.clone());
-      const otherBounds = new THREE.Box3(
-        new THREE.Vector3(Math.min(otherA.x, otherB.x), Math.min(otherA.y, otherB.y), Math.min(otherA.z, otherB.z)),
-        new THREE.Vector3(Math.max(otherA.x, otherB.x), Math.max(otherA.y, otherB.y), Math.max(otherA.z, otherB.z))
-      ).expandByScalar(1e-6);
+      other.group?.updateWorldMatrix?.(true, false);
+      const otherInv = other.group.matrixWorld.clone().invert();
+      const nodeToOther = otherInv.multiply(node.group.matrixWorld);
+      const otherBounds = bounds.clone().applyMatrix4(nodeToOther);
       const otherPivot = other.pivotLocal;
       const found = contraption.blocks.some(block => {
         if (blockOwnerId(contraption, block) !== other.id) return false;
