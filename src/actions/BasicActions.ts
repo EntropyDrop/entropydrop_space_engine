@@ -654,6 +654,9 @@ function executeEntityAction(context: any, command: any) {
       });
     }
     case 'start-scripts': {
+      if (contraption.isWrenchGrabbed || context?.manager?.controller?.wrenchGrab?.contraption === contraption) {
+        return actionResult(command.action, 0, 'wrench_grabbed', { status: 'stopped', physicsEnabled: false });
+      }
       const hasRunnableCode = !!contraption.compiledScript || (contraption.compiledNodeScripts?.size || 0) > 0;
       if (!hasRunnableCode) {
         if (contraption.isPhysicsSimulationEnabled?.() === false) {

@@ -571,6 +571,7 @@ export class Contraption {
 
   // --- Operational mode ---
   mode: string;
+  isWrenchGrabbed: boolean;
 
   // --- Programmable script state ---
   scriptCode: string;
@@ -687,6 +688,7 @@ export class Contraption {
     this.appliedTorques = new THREE.Vector3(0, 0, 0);
     this.lastAppliedForce = new THREE.Vector3(0, 0, 0);
     this.lastAppliedTorque = new THREE.Vector3(0, 0, 0);
+    this.isWrenchGrabbed = false;
 
     // Programmable Script State
     this.scriptCode = options.scriptCode || '';
@@ -5087,7 +5089,7 @@ export class Contraption {
   }
 
   applyLatchedScriptCommands(runtimeContext) {
-    if (this.scriptStatus === 'stopped') return;
+    if (this.scriptStatus === 'stopped' || this.isWrenchGrabbed) return;
     for (const command of this.latchedScriptCommands) {
       if (!this.isNodeScriptEnabled(String(command.nodeId || this.rootComponentId))) continue;
       const api = this.getChildScriptApi(String(command.nodeId || this.rootComponentId));
@@ -5190,7 +5192,7 @@ export class Contraption {
   }
 
   updateProgrammable(dt, inputState, runtimeContext) {
-    if (this.scriptStatus === 'stopped') {
+    if (this.scriptStatus === 'stopped' || this.isWrenchGrabbed) {
       this.appliedForces.set(0, 0, 0);
       this.appliedTorques.set(0, 0, 0);
       return;
