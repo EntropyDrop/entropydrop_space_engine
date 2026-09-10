@@ -836,19 +836,54 @@ function invalidateInternalEntitySelections(context: any, contraption: any) {
   }
 }
 
-function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB: any, space = 'node-local', microOnly = false) {
+function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB: any, space = 'node-local', microOnly = false, allComponents = false) {
   const node = contraption?.entityNodes?.get(nodeId);
   const a = toPoint(pointA);
   const b = toPoint(pointB);
   if (!node || !a || !b) return { selected: [], components: [] };
   node.group?.updateWorldMatrix?.(true, false);
+  const isMicroBlock = (block: any) => (block.size || 1) < 1;
+  const worldA = space === 'world' ? a.clone() : node.group.localToWorld(a.clone());
+  const worldB = space === 'world' ? b.clone() : node.group.localToWorld(b.clone());
+
+  if (allComponents) {
+    const selected: any[] = [];
+    const componentsSet = new Set<string>();
+    const blockBounds = new THREE.Box3();
+
+    for (const targetNode of contraption.entityNodes.values()) {
+      targetNode.group?.updateWorldMatrix?.(true, false);
+      const localA = targetNode.group.worldToLocal(worldA.clone());
+      const localB = targetNode.group.worldToLocal(worldB.clone());
+      const bounds = new THREE.Box3(
+        new THREE.Vector3(Math.min(localA.x, localB.x), Math.min(localA.y, localB.y), Math.min(localA.z, localB.z)),
+        new THREE.Vector3(Math.max(localA.x, localB.x), Math.max(localA.y, localB.y), Math.max(localA.z, localB.z))
+      ).expandByScalar(1e-6);
+      const pivot = targetNode.pivotLocal;
+
+      for (const block of contraption.blocks) {
+        if (blockOwnerId(contraption, block) !== targetNode.id) continue;
+        if (microOnly && !isMicroBlock(block)) continue;
+        const size = block.size || 1;
+        blockBounds.set(
+          new THREE.Vector3(block.localX - pivot.x, block.localY - pivot.y, block.localZ - pivot.z),
+          new THREE.Vector3(block.localX + size - pivot.x, block.localY + size - pivot.y, block.localZ + size - pivot.z)
+        );
+        if (blockBounds.intersectsBox(bounds)) {
+          selected.push(block);
+          componentsSet.add(targetNode.id);
+        }
+      }
+    }
+    return { selected, components: Array.from(componentsSet).sort() };
+  }
+
   const aLocal = space === 'world' ? node.group.worldToLocal(a.clone()) : a;
   const bLocal = space === 'world' ? node.group.worldToLocal(b.clone()) : b;
   const bounds = new THREE.Box3(
     new THREE.Vector3(Math.min(aLocal.x, bLocal.x), Math.min(aLocal.y, bLocal.y), Math.min(aLocal.z, bLocal.z)),
     new THREE.Vector3(Math.max(aLocal.x, bLocal.x), Math.max(aLocal.y, bLocal.y), Math.max(aLocal.z, bLocal.z))
   ).expandByScalar(1e-6);
-  const isMicroBlock = block => (block.size || 1) < 1;
   const pivot = node.pivotLocal;
   const blockBounds = new THREE.Box3();
   const selected = contraption.blocks.filter(block => {
@@ -864,8 +899,6 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
 
   const components: string[] = [];
   if (selected.length === 0 && node.group) {
-    const worldA = space === 'world' ? a.clone() : node.group.localToWorld(a.clone());
-    const worldB = space === 'world' ? b.clone() : node.group.localToWorld(b.clone());
     for (const other of contraption.entityNodes.values()) {
       if (other.id === nodeId) continue;
       const otherA = other.group.worldToLocal(worldA.clone());
@@ -999,7 +1032,15 @@ function executeSelectionAction(context: any, command: any) {
         invalidateInternalEntitySelections(context, contraption);
         return actionResult(command.action, 0, 'entity_not_stopped', { selected: 0, components: [] });
       }
-      const matches = entityBoxMatches(contraption, nodeId, command.a, command.b, command.space, command.micro === true);
+      const matches = entityBoxMatches(
+        contraption,
+        nodeId,
+        command.a,
+        command.b,
+        command.space,
+        command.micro === true,
+        command.allComponents !== false
+      );
       if (matches.selected.length === 0) {
         return actionResult(command.action, 0, 'not_found', { selected: 0, components: matches.components });
       }
@@ -1007,11 +1048,17 @@ function executeSelectionAction(context: any, command: any) {
       manager?.clearSelection?.();
       contraption.clearSubtreeHighlight?.();
       contraption.highlightBlocks?.(matches.selected);
-      owner.entitySelection = { kind: 'entity-blocks', contraption, nodeId, blocks: matches.selected };
+      owner.entitySelection = {
+        kind: 'entity-blocks',
+        contraption,
+        nodeId: matches.components.length === 1 ? matches.components[0] : nodeId,
+        blocks: matches.selected,
+        components: matches.components
+      };
       return actionResult(command.action, matches.selected.length, 'selected', {
         selected: matches.selected.length,
         selection: owner.entitySelection,
-        components: []
+        components: matches.components
       });
     }
     case 'toggle-entity-block': {
@@ -1543,15 +1590,32 @@ function executeSelectionAction(context: any, command: any) {
       if (!selected?.contraption || !Array.isArray(selected.blocks) || selected.blocks.length === 0) {
         return actionResult(command.action, 0, 'no_selection', { child: null });
       }
+
+      const componentSet = new Set<string>();
+      for (const b of selected.blocks) {
+        const ownerId = blockOwnerId(selected.contraption, b);
+        if (ownerId) componentSet.add(ownerId);
+      }
+      if (componentSet.size > 1) {
+        return actionResult(command.action, 0, 'multiple_components', {
+          child: null,
+          childId: null,
+          components: Array.from(componentSet).sort()
+        });
+      }
+      const targetNodeId = componentSet.size === 1
+        ? [...componentSet][0]
+        : requestedNodeId(selected.contraption, selected.nodeId);
+
       const child = selected.preparedBounds
         ? selected.contraption.createChildEntityFromPrepared?.(
-            requestedNodeId(selected.contraption, selected.nodeId),
+            targetNodeId,
             selected.blocks,
             selected.preparedBounds,
             command.id || null
           )
         : selected.contraption.createChildEntity?.(
-            requestedNodeId(selected.contraption, selected.nodeId),
+            targetNodeId,
             selected.blocks,
             command.id || null
           );
