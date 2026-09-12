@@ -4142,10 +4142,24 @@ export class Contraption {
     this.focusedHighlightNodeId = nodeId;
 
     const materials = {
+      // Outlines stay depth-independent so the selected component is visible
+      // through the parent model.
       focusedLine: new THREE.LineBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false }),
-      focusedFill: new THREE.MeshBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.08, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
+      // Fills are depth-TESTED so the model occludes them instead of the fill
+      // blending through it (which read as the highlight "clipping into" the
+      // component). The box matches the block AABB exactly (no inflation), so a
+      // polygon offset keeps the coincident faces from z-fighting the voxels.
+      focusedFill: new THREE.MeshBasicMaterial({
+        color: 0x00d2d3, transparent: true, opacity: 0.08,
+        depthTest: true, depthWrite: false, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+      }),
       childLine: new THREE.LineBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false }),
-      childFill: new THREE.MeshBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.12, depthTest: false, depthWrite: false, side: THREE.DoubleSide })
+      childFill: new THREE.MeshBasicMaterial({
+        color: 0x2ed573, transparent: true, opacity: 0.12,
+        depthTest: true, depthWrite: false, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+      })
     };
     this.focusHighlightMaterials = materials;
     this.focusHighlightGeometries = [];
