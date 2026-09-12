@@ -17,6 +17,8 @@ export class ChunkedVoxelIndex {
   private readonly chunks = new Map<string, IndexChunk>();
   private readonly itemMap = new Map<any, { chunkKey: string; voxel: IndexedVoxel }>();
   private nextOrder = 0;
+  private batchDepth = 0;
+  private dirtyChunks = new Set<string>();
 
   constructor(items: IndexedVoxel[] = []) {
     this.bounds = {
@@ -63,7 +65,9 @@ export class ChunkedVoxelIndex {
     this.itemMap.set(voxel.entry, { chunkKey: key, voxel });
 
     if (updateBounds) {
-      if (chunk.items.length > 16) {
+      if (this.batchDepth > 0) {
+        this.dirtyChunks.add(key);
+      } else if (chunk.items.length > 16) {
         chunk.subIndex = new CollisionBoxIndex(chunk.items);
       }
       this.bounds.minX = Math.min(this.bounds.minX, voxel.minX);
@@ -96,6 +100,12 @@ export class ChunkedVoxelIndex {
     const idx = chunk.items.findIndex(item => item.entry === entry);
     if (idx >= 0) chunk.items.splice(idx, 1);
 
+    if (this.batchDepth > 0) {
+      if (chunk.items.length === 0) this.chunks.delete(mapping.chunkKey);
+      this.dirtyChunks.add(mapping.chunkKey);
+      return true;
+    }
+
     if (chunk.items.length === 0) {
       this.chunks.delete(mapping.chunkKey);
     } else {
@@ -120,6 +130,38 @@ export class ChunkedVoxelIndex {
     for (const chunk of this.chunks.values()) {
       if (chunk.items.length > 16) {
         chunk.subIndex = new CollisionBoxIndex(chunk.items);
+      }
+    }
+  }
+
+  /** Apply one edit atomically; rebuild each touched spatial tree only once. */
+  batchUpdate(update: () => void) {
+    this.batchDepth++;
+    try {
+      update();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0 && this.dirtyChunks.size > 0) {
+        for (const key of this.dirtyChunks) {
+          const chunk = this.chunks.get(key);
+          if (!chunk) continue;
+          const bounds = {
+            minX: Infinity, minY: Infinity, minZ: Infinity,
+            maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity
+          };
+          for (const item of chunk.items) {
+            bounds.minX = Math.min(bounds.minX, item.minX);
+            bounds.minY = Math.min(bounds.minY, item.minY);
+            bounds.minZ = Math.min(bounds.minZ, item.minZ);
+            bounds.maxX = Math.max(bounds.maxX, item.maxX);
+            bounds.maxY = Math.max(bounds.maxY, item.maxY);
+            bounds.maxZ = Math.max(bounds.maxZ, item.maxZ);
+          }
+          chunk.bounds = bounds;
+          chunk.subIndex = chunk.items.length > 16 ? new CollisionBoxIndex(chunk.items) : undefined;
+        }
+        this.dirtyChunks.clear();
+        this.recomputeBounds();
       }
     }
   }

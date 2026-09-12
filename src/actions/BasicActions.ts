@@ -129,13 +129,13 @@ function resolveContraption(context: any, target: any) {
   )) || null;
 }
 
-function finishEntityMutation(context: any, contraption: any, type: string, nodeId: string, event: any = null) {
+function finishEntityMutation(context: any, contraption: any, type: string, nodeId: string, event: any = null, changes: any = null) {
   const empty = !contraption.blocks || contraption.blocks.length === 0;
   const manager = context?.manager || contraption?.actionContext?.manager;
   if (empty && manager?.contraptions?.includes(contraption)) {
     manager.removeContraption(contraption);
   } else {
-    contraption.rebuildAfterBlockChange?.(type, nodeId, event);
+    contraption.rebuildAfterBlockChange?.(type, nodeId, event, changes);
   }
   return empty;
 }
@@ -686,14 +686,65 @@ function executeEntityAction(context: any, command: any) {
       const selectedBlocks = Array.isArray(command.blocks) ? command.blocks : [];
       const selected = new Set(selectedBlocks);
       if (selected.size === 0) return actionResult(command.action, 0, 'not_found', { removed: 0 });
-      const before = contraption.blocks.length;
-      contraption.blocks = contraption.blocks.filter(block => !selected.has(block));
-      const removed = before - contraption.blocks.length;
+      // Virtual selections refer to cells inside live standard blocks. Carve
+      // them directly so collision, picking, meshes and observers see only the
+      // final result, never an intermediate 512-cell subdivision.
+      const liveBlocks = new Set(contraption.blocks);
+      const carved = new Map<any, Set<number>>();
+      for (const block of selectedBlocks) {
+        const source = block.sourceBlock;
+        if (!block.virtualMicro || !liveBlocks.has(source) || (source.size || 1) < 1
+          || blockOwnerId(contraption, source) !== nodeId) continue;
+        const x = Math.round((block.localX - Math.floor(source.localX + 1e-6)) * MICRO_DIVISIONS);
+        const y = Math.round((block.localY - Math.floor(source.localY + 1e-6)) * MICRO_DIVISIONS);
+        const z = Math.round((block.localZ - Math.floor(source.localZ + 1e-6)) * MICRO_DIVISIONS);
+        if (![x, y, z].every(v => Number.isInteger(v) && v >= 0 && v < MICRO_DIVISIONS)) continue;
+        let cells = carved.get(source);
+        if (!cells) carved.set(source, cells = new Set());
+        cells.add((x * MICRO_DIVISIONS + y) * MICRO_DIVISIONS + z);
+      }
+      const next: any[] = [];
+      const added: any[] = [];
+      const removedBlocks: any[] = [];
+      let removed = 0;
+      for (const original of contraption.blocks) {
+        if (selected.has(original) && blockOwnerId(contraption, original) === nodeId) {
+          removedBlocks.push(original);
+          removed++;
+          continue;
+        }
+        const cells = carved.get(original);
+        if (!cells) { next.push(original); continue; }
+        removedBlocks.push(original);
+        removed += cells.size;
+        if (cells.size === MICRO_CELLS_PER_BLOCK) continue;
+        const base = blockCell(original);
+        for (let x = 0; x < MICRO_DIVISIONS; x++) {
+          for (let y = 0; y < MICRO_DIVISIONS; y++) {
+            for (let z = 0; z < MICRO_DIVISIONS; z++) {
+              if (cells.has((x * MICRO_DIVISIONS + y) * MICRO_DIVISIONS + z)) continue;
+              const survivor = {
+                localX: base.x + x * MICRO_SIZE,
+                localY: base.y + y * MICRO_SIZE,
+                localZ: base.z + z * MICRO_SIZE,
+                size: MICRO_SIZE,
+                color: original.color ?? DEFAULT_BLOCK_COLOR,
+                block: original.block || BlockTypes.COLOR_BLOCK,
+                entityId: original.entityId ?? nodeId,
+                ...(original.part ? { part: original.part } : {})
+              };
+              next.push(survivor);
+              added.push(survivor);
+            }
+          }
+        }
+      }
       if (!removed) return actionResult(command.action, 0, 'not_found', { removed: 0 });
+      contraption.blocks = next;
       const empty = finishEntityMutation(context, contraption, 'remove', nodeId, entityMutationEvent(command, {
         cells: selectedBlocks.slice(0, 64).map(block => [block.localX, block.localY, block.localZ]),
         truncated: selectedBlocks.length > 64
-      }));
+      }), { added, removed: removedBlocks });
       return actionResult(command.action, removed, 'removed', { removed, empty });
     }
     case 'remove-subtree': {

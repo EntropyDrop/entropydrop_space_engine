@@ -86,6 +86,65 @@ function collisionCellKey(block: any): string {
   return `${Math.floor(block.localX + 1e-6)},${Math.floor(block.localY + 1e-6)},${Math.floor(block.localZ + 1e-6)}`;
 }
 
+function voxelMeshKey(x: number, y: number, z: number, size: number): string {
+  return `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`;
+}
+
+function microMeshCellKey(x: number, y: number, z: number): string {
+  return `micro:${Math.floor(x + 1e-6)},${Math.floor(y + 1e-6)},${Math.floor(z + 1e-6)}`;
+}
+
+function indexVoxelMeshBlock(index: Map<string, any>, block: any, add: boolean) {
+  const size = block.size || 1;
+  const key = voxelMeshKey(block.localX, block.localY, block.localZ, size);
+  if (add) index.set(key, block);
+  else index.delete(key);
+  if (size < 1) {
+    const cellKey = microMeshCellKey(block.localX, block.localY, block.localZ);
+    const count = (index.get(cellKey) || 0) + (add ? 1 : -1);
+    if (count > 0) index.set(cellKey, count);
+    else index.delete(cellKey);
+  }
+}
+
+/** Shared face tessellation for rendering and picking on the curved world. */
+function* visibleVoxelFaceQuads(block: any, normal: number[], quad: number[][], index?: Map<string, any>) {
+  const size = block.size || 1;
+  const nx = block.localX + normal[0] * size;
+  const ny = block.localY + normal[1] * size;
+  const nz = block.localZ + normal[2] * size;
+  if (index?.has(voxelMeshKey(nx, ny, nz, size))) return;
+  if (size < 1 && index?.has(voxelMeshKey(
+    Math.floor(nx + 1e-6), Math.floor(ny + 1e-6), Math.floor(nz + 1e-6), 1
+  ))) return;
+
+  // Standard-only faces remain compact. At mixed-grid boundaries, emit only
+  // the micro patches exposed by the cut, with no coplanar internal faces.
+  if (size !== 1 || !index?.has(microMeshCellKey(nx, ny, nz))) {
+    yield quad;
+    return;
+  }
+  const at = (a: number, b: number) => quad[0].map((origin, axis) => (
+    origin + (quad[1][axis] - origin) * a / MICRO_DIVISIONS
+      + (quad[3][axis] - origin) * b / MICRO_DIVISIONS
+  ));
+  const exposed: number[][][] = [];
+  for (let u = 0; u < MICRO_DIVISIONS; u++) {
+    for (let v = 0; v < MICRO_DIVISIONS; v++) {
+      const center = at(u + 0.5, v + 0.5);
+      const mx = Math.floor((block.localX + center[0] + normal[0] * MICRO_SIZE / 2) * MICRO_DIVISIONS + 1e-6) * MICRO_SIZE;
+      const my = Math.floor((block.localY + center[1] + normal[1] * MICRO_SIZE / 2) * MICRO_DIVISIONS + 1e-6) * MICRO_SIZE;
+      const mz = Math.floor((block.localZ + center[2] + normal[2] * MICRO_SIZE / 2) * MICRO_DIVISIONS + 1e-6) * MICRO_SIZE;
+      if (index.has(voxelMeshKey(mx, my, mz, MICRO_SIZE))) continue;
+      exposed.push([at(u, v), at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)]);
+    }
+  }
+  // Interior micro cells do not change this face. Keep its original triangles
+  // until a micro cell actually touches it, matching chunk invalidation.
+  if (exposed.length === MICRO_DIVISIONS ** 2) yield quad;
+  else yield* exposed;
+}
+
 function isFiniteVector3Array(value: any): boolean {
   return Array.isArray(value)
     && value.length >= 3
@@ -347,6 +406,7 @@ function angularVelocityBetween(previous: THREE.Quaternion, current: THREE.Quate
  * parent-relative transforms; each node also owns a kinematic or dynamic body.
  */
 export interface EntityNode {
+  meshCellMap?: Map<string, any>;
   id: string;
   parentId: string | null;
   pivotLocal: THREE.Vector3;
@@ -3789,7 +3849,7 @@ export class Contraption {
     return Object.freeze(constraints.map(constraint => Object.freeze(constraint)));
   }
 
-  rebuildAfterBlockChange(type = 'change', nodeId = null, event = null) {
+  rebuildAfterBlockChange(type = 'change', nodeId = null, event = null, changes = null) {
     const targetNodeId = String(nodeId || this.rootComponentId);
 
     const hasHierarchyChange = type === 'install' ||
@@ -3828,14 +3888,19 @@ export class Contraption {
     // Determine added and removed blocks
     let addedBlocks: any[] = [];
     let removedBlocks: any[] = [];
-    if (this.lastBlocksSet) {
-      if (this.blocks.length === this.lastBlocksSet.size + 1) {
+    if (changes && this.lastBlocksSet) {
+      addedBlocks = changes.added;
+      removedBlocks = changes.removed;
+      for (const block of removedBlocks) this.lastBlocksSet.delete(block);
+      for (const block of addedBlocks) this.lastBlocksSet.add(block);
+    } else if (this.lastBlocksSet) {
+      if (type === 'place' && event?.cell && this.blocks.length === this.lastBlocksSet.size + 1) {
         const lastB = this.blocks[this.blocks.length - 1];
         if (lastB && !this.lastBlocksSet.has(lastB)) {
           addedBlocks.push(lastB);
           this.lastBlocksSet.add(lastB);
         }
-      } else if (this.blocks.length === this.lastBlocksSet.size - 1 && event?.cell) {
+      } else if (type === 'remove' && this.blocks.length === this.lastBlocksSet.size - 1 && event?.cell) {
         const [cx, cy, cz] = event.cell;
         const bSize = event.size || 1;
         for (const b of this.lastBlocksSet) {
@@ -3847,7 +3912,7 @@ export class Contraption {
           }
         }
       }
-      if (addedBlocks.length === 0 && removedBlocks.length === 0 && this.blocks.length !== this.lastBlocksSet.size) {
+      if (addedBlocks.length === 0 && removedBlocks.length === 0) {
         const currentSet = new Set(this.blocks);
         for (const b of this.blocks) {
           if (!this.lastBlocksSet.has(b)) addedBlocks.push(b);
@@ -3879,33 +3944,34 @@ export class Contraption {
       this.updateCollisionIncremental(addedBlocks, removedBlocks);
 
       if (this.collisionVoxelIndexes) {
-        for (const b of addedBlocks) {
-          const entId = b.entityId || this.rootComponentId;
-          const span = Math.max(1, Math.round((b.size || 1) / MICRO_SIZE));
-          const x = Math.floor(b.localX / MICRO_SIZE + 1e-6);
-          const y = Math.floor(b.localY / MICRO_SIZE + 1e-6);
-          const z = Math.floor(b.localZ / MICRO_SIZE + 1e-6);
-          const entryKey = `${entId}:${x},${y},${z}:${span}`;
-          const entry = this.collisionEntryMap?.get(entryKey);
-          const idx = this.collisionVoxelIndexes.indexes?.get(entId);
-          if (idx && entry) idx.add(entry, x * MICRO_SIZE, y * MICRO_SIZE, z * MICRO_SIZE, span * MICRO_SIZE);
-        }
-        for (const { entry, entityId: entId } of removedCollisionEntries) {
-          const idx = this.collisionVoxelIndexes.indexes?.get(entId);
-          if (idx) idx.remove(entry);
+        for (const [entId, idx] of this.collisionVoxelIndexes.indexes) {
+          idx.batchUpdate(() => {
+            for (const { entry, entityId } of removedCollisionEntries) {
+              if (entityId === entId) idx.remove(entry);
+            }
+            for (const b of addedBlocks) {
+              if ((b.entityId || this.rootComponentId) !== entId) continue;
+              const span = Math.max(1, Math.round((b.size || 1) / MICRO_SIZE));
+              const x = Math.floor(b.localX / MICRO_SIZE + 1e-6);
+              const y = Math.floor(b.localY / MICRO_SIZE + 1e-6);
+              const z = Math.floor(b.localZ / MICRO_SIZE + 1e-6);
+              const entry = this.collisionEntryMap?.get(`${entId}:${x},${y},${z}:${span}`);
+              if (entry) idx.add(entry, x * MICRO_SIZE, y * MICRO_SIZE, z * MICRO_SIZE, span * MICRO_SIZE);
+            }
+          });
         }
         this.collisionVoxelIndexes.shape = this.collisionCellMap;
       }
       if (this.pickingVoxelIndexes) {
-        for (const b of addedBlocks) {
-          const entId = b.entityId || this.rootComponentId;
-          const idx = this.pickingVoxelIndexes.indexes?.get(entId);
-          if (idx) idx.add(b, b.localX, b.localY, b.localZ, b.size || 1);
-        }
-        for (const b of removedBlocks) {
-          const entId = b.entityId || this.rootComponentId;
-          const idx = this.pickingVoxelIndexes.indexes?.get(entId);
-          if (idx) idx.remove(b);
+        for (const [entId, idx] of this.pickingVoxelIndexes.indexes) {
+          idx.batchUpdate(() => {
+            for (const b of removedBlocks) {
+              if ((b.entityId || this.rootComponentId) === entId) idx.remove(b);
+            }
+            for (const b of addedBlocks) {
+              if ((b.entityId || this.rootComponentId) === entId) idx.add(b, b.localX, b.localY, b.localZ, b.size || 1);
+            }
+          });
         }
         this.pickingVoxelIndexes.shape = this.collisionCellMap;
       }
@@ -4308,7 +4374,7 @@ export class Contraption {
     }
   }
 
-  createVoxelMesh(blocks, coordinateOrigin, parentGroup, externalMeshCellMap: Map<string, any> | null = null) {
+  createVoxelMesh(blocks, coordinateOrigin, parentGroup, externalMeshCellMap: Map<string, any> | null = null, existingMesh: THREE.Mesh | null = null) {
     if (blocks.length === 0) return null;
     const positions = [];
     const normals = [];
@@ -4323,13 +4389,9 @@ export class Contraption {
       { dir: [1, 0, 0], norm: [1, 0, 0], quad: [[1, 1, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]], face: 'side' }
     ];
 
-    const meshKey = (x, y, z, size) => `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`;
     const meshCellMap = externalMeshCellMap || new Map();
     if (!externalMeshCellMap) {
-      for (const b of blocks) {
-        const size = b.size || 1;
-        meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
-      }
+      for (const b of blocks) indexVoxelMeshBlock(meshCellMap, b, true);
     }
 
     const tempColor = new THREE.Color();
@@ -4342,12 +4404,6 @@ export class Contraption {
       const oz = b.localZ - coordinateOrigin.z;
 
       for (const f of faces) {
-        const nx = b.localX + f.dir[0] * blockSize;
-        const ny = b.localY + f.dir[1] * blockSize;
-        const nz = b.localZ + f.dir[2] * blockSize;
-
-        if (meshCellMap.has(meshKey(nx, ny, nz, blockSize))) continue;
-
         const hexColor = b.color ?? DEFAULT_BLOCK_COLOR;
         tempColor.set(hexColor);
         const shade = f.face === 'top' ? 1.0 : f.face === 'bottom' ? 0.6 : 0.85;
@@ -4355,19 +4411,16 @@ export class Contraption {
         const g = tempColor.g * shade;
         const bCol = tempColor.b * shade;
 
-        const q = f.quad;
-        const v0 = [ox + q[0][0] * blockSize, oy + q[0][1] * blockSize, oz + q[0][2] * blockSize];
-        const v1 = [ox + q[1][0] * blockSize, oy + q[1][1] * blockSize, oz + q[1][2] * blockSize];
-        const v2 = [ox + q[2][0] * blockSize, oy + q[2][1] * blockSize, oz + q[2][2] * blockSize];
-        const v3 = [ox + q[3][0] * blockSize, oy + q[3][1] * blockSize, oz + q[3][2] * blockSize];
+        for (const quad of visibleVoxelFaceQuads(b, f.norm, f.quad, meshCellMap)) {
+          const v0 = [ox + quad[0][0] * blockSize, oy + quad[0][1] * blockSize, oz + quad[0][2] * blockSize];
+          const v1 = [ox + quad[1][0] * blockSize, oy + quad[1][1] * blockSize, oz + quad[1][2] * blockSize];
+          const v2 = [ox + quad[2][0] * blockSize, oy + quad[2][1] * blockSize, oz + quad[2][2] * blockSize];
+          const v3 = [ox + quad[3][0] * blockSize, oy + quad[3][1] * blockSize, oz + quad[3][2] * blockSize];
 
-        positions.push(...v0, ...v1, ...v2);
-        normals.push(...f.norm, ...f.norm, ...f.norm);
-        colors.push(r, g, bCol, r, g, bCol, r, g, bCol);
-
-        positions.push(...v0, ...v2, ...v3);
-        normals.push(...f.norm, ...f.norm, ...f.norm);
-        colors.push(r, g, bCol, r, g, bCol, r, g, bCol);
+          positions.push(...v0, ...v1, ...v2, ...v0, ...v2, ...v3);
+          normals.push(...f.norm, ...f.norm, ...f.norm, ...f.norm, ...f.norm, ...f.norm);
+          colors.push(r, g, bCol, r, g, bCol, r, g, bCol, r, g, bCol, r, g, bCol, r, g, bCol);
+        }
       }
     }
 
@@ -4377,6 +4430,11 @@ export class Contraption {
       geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
       geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
+      if (existingMesh) {
+        existingMesh.geometry.dispose();
+        existingMesh.geometry = geo;
+        return existingMesh;
+      }
       const mat = new THREE.MeshStandardMaterial({
         vertexColors: true,
         flatShading: true,
@@ -4412,12 +4470,8 @@ export class Contraption {
     node.voxelChunkBlocks = new Map<string, Set<any>>();
 
     const nodeBlocks = this.blocks.filter(b => (b.entityId || this.rootComponentId) === node.id);
-    const meshKey = (x: number, y: number, z: number, size: number) => (
-      `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`
-    );
     for (const b of nodeBlocks) {
-      const size = b.size || 1;
-      node.meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+      indexVoxelMeshBlock(node.meshCellMap, b, true);
       const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
       let cSet = node.voxelChunkBlocks.get(ck);
       if (!cSet) node.voxelChunkBlocks.set(ck, cSet = new Set());
@@ -4435,22 +4489,16 @@ export class Contraption {
       this.buildNodeChunkMeshes(node);
       return;
     }
-    const meshKey = (x: number, y: number, z: number, size: number) => (
-      `${Math.round(x * MICRO_DIVISIONS)},${Math.round(y * MICRO_DIVISIONS)},${Math.round(z * MICRO_DIVISIONS)},${Math.round(size * MICRO_DIVISIONS)}`
-    );
-
     for (const b of removedBlocks) {
       if ((b.entityId || this.rootComponentId) === node.id) {
-        const size = b.size || 1;
-        node.meshCellMap.delete(meshKey(b.localX, b.localY, b.localZ, size));
+        indexVoxelMeshBlock(node.meshCellMap, b, false);
         const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
         node.voxelChunkBlocks.get(ck)?.delete(b);
       }
     }
     for (const b of addedBlocks) {
       if ((b.entityId || this.rootComponentId) === node.id) {
-        const size = b.size || 1;
-        node.meshCellMap.set(meshKey(b.localX, b.localY, b.localZ, size), b);
+        indexVoxelMeshBlock(node.meshCellMap, b, true);
         const ck = `${Math.floor(b.localX / 8)},${Math.floor(b.localY / 8)},${Math.floor(b.localZ / 8)}`;
         let cSet = node.voxelChunkBlocks.get(ck);
         if (!cSet) node.voxelChunkBlocks.set(ck, cSet = new Set());
@@ -4461,16 +4509,21 @@ export class Contraption {
     for (const ck of dirtyChunkKeys) {
       const cSet = node.voxelChunkBlocks.get(ck);
       const existingMesh = node.voxelChunks?.get(ck);
+      // Build the replacement before disposing published geometry and retain
+      // the mesh/material so local edits do not churn WebGL shader state.
+      const mesh = cSet && cSet.size > 0
+        ? this.createVoxelMesh(Array.from(cSet), node.pivotLocal, node.voxelChunkGroup, node.meshCellMap, existingMesh)
+        : null;
+      if (mesh) {
+        node.voxelChunks?.set(ck, mesh);
+        continue;
+      }
       if (existingMesh) {
         node.voxelChunkGroup.remove(existingMesh);
         existingMesh.geometry.dispose();
         if (Array.isArray(existingMesh.material)) existingMesh.material.forEach((m: any) => m.dispose());
         else existingMesh.material.dispose();
         node.voxelChunks?.delete(ck);
-      }
-      if (cSet && cSet.size > 0) {
-        const mesh = this.createVoxelMesh(Array.from(cSet), node.pivotLocal, node.voxelChunkGroup, node.meshCellMap);
-        if (mesh) node.voxelChunks?.set(ck, mesh);
       }
     }
   }
@@ -5715,36 +5768,39 @@ export class Contraption {
       if (ray.distanceSqToPoint(bentCenter) > pickRadius * pickRadius) continue;
 
       for (const face of COLLISION_RAYCAST_FACES) {
-        const localCorners = face.quad.map(([x, y, z]) => new THREE.Vector3(
-          baseX + x * size,
-          baseY + y * size,
-          baseZ + z * size
-        ));
-        const flatCorners = localCorners.map(corner => corner.clone().applyMatrix4(node.group.matrixWorld));
-        const bentCorners = flatCorners.map(corner => bendPoint(corner.x, corner.y, corner.z));
+        for (const quad of visibleVoxelFaceQuads(block, face.normal, face.quad, node.meshCellMap)) {
+          const localCorners = quad.map(([x, y, z]) => new THREE.Vector3(
+            baseX + x * size,
+            baseY + y * size,
+            baseZ + z * size
+          ));
+          const flatCorners = localCorners.map(corner => corner.clone().applyMatrix4(node.group.matrixWorld));
+          const bentCorners = flatCorners.map(corner => bendPoint(corner.x, corner.y, corner.z));
 
-        for (const [ia, ib, ic] of [[0, 1, 2], [0, 2, 3]]) {
-          const bentPoint = new THREE.Vector3();
-          if (!intersectCollisionTriangleInclusive(
-            ray, bentCorners[ia], bentCorners[ib], bentCorners[ic], bentPoint, barycentric
-          )) continue;
-          const distance = rayOriginBent.distanceTo(bentPoint);
-          if (distance > closestDistance) continue;
-          const localPoint = localCorners[ia].clone().multiplyScalar(barycentric.x)
-            .addScaledVector(localCorners[ib], barycentric.y)
-            .addScaledVector(localCorners[ic], barycentric.z);
-          const worldPoint = flatCorners[ia].clone().multiplyScalar(barycentric.x)
-            .addScaledVector(flatCorners[ib], barycentric.y)
-            .addScaledVector(flatCorners[ic], barycentric.z);
-          const localNormal = new THREE.Vector3(...face.normal);
+          for (const [ia, ib, ic] of [[0, 1, 2], [0, 2, 3]]) {
+            const bentPoint = new THREE.Vector3();
+            if (!intersectCollisionTriangleInclusive(
+              ray, bentCorners[ia], bentCorners[ib], bentCorners[ic], bentPoint, barycentric
+            )) continue;
+            const distance = rayOriginBent.distanceTo(bentPoint);
+            if (distance > closestDistance) continue;
+            const localPoint = localCorners[ia].clone().multiplyScalar(barycentric.x)
+              .addScaledVector(localCorners[ib], barycentric.y)
+              .addScaledVector(localCorners[ic], barycentric.z);
+            const worldPoint = flatCorners[ia].clone().multiplyScalar(barycentric.x)
+              .addScaledVector(flatCorners[ib], barycentric.y)
+              .addScaledVector(flatCorners[ic], barycentric.z);
+            const localNormal = new THREE.Vector3(...face.normal);
 
-          closestDistance = distance;
-          closest = this.buildCollisionRaycastHit(
-            block, node, localPoint, worldPoint, distance, localNormal
-          );
+            closestDistance = distance;
+            closest = this.buildCollisionRaycastHit(
+              block, node, localPoint, worldPoint, distance, localNormal
+            );
+          }
         }
       }
     }
+
     return closest;
   }
 
