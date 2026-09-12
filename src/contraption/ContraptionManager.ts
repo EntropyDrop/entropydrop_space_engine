@@ -95,7 +95,7 @@ export class ContraptionManager {
   declare worldId: string;
   declare lastEntitySaveTime: number;
   declare persistentStorage: SpaceStorage | null;
-  declare entityPersistenceMode: 'browser' | 'remote';
+  declare entityPersistenceMode: 'browser' | 'remote' | 'none';
   declare remoteEntityPersistence: any;
 
   constructor(scene, world, soundManager, particleSystem, persistentStorage: SpaceStorage | null = null) {
@@ -943,11 +943,13 @@ export class ContraptionManager {
     this.worldId = String(worldId || 'default');
   }
 
-  /** Select browser persistence for offline worlds or backend persistence online. */
-  setEntityPersistenceMode(mode: 'browser' | 'remote', adapter: any = null) {
-    this.entityPersistenceMode = mode === 'remote' ? 'remote' : 'browser';
+  /** Select browser persistence for offline worlds, backend persistence online, or none to disable persistence. */
+  setEntityPersistenceMode(mode: 'browser' | 'remote' | 'none', adapter: any = null) {
+    this.entityPersistenceMode = mode === 'remote' ? 'remote' : (mode === 'none' ? 'none' : 'browser');
     this.remoteEntityPersistence = this.entityPersistenceMode === 'remote' ? adapter : null;
-    if (this.entityPersistenceMode === 'remote') this.purgeBrowserEntityStorage();
+    if (this.entityPersistenceMode === 'remote' || this.entityPersistenceMode === 'none') {
+      this.purgeBrowserEntityStorage();
+    }
   }
 
   setRemoteEntityPersistence(adapter: any) {
@@ -980,6 +982,7 @@ export class ContraptionManager {
    * Persist all active and dormant entities to browser storage.
    */
   saveEntitiesToStorage(storage = this.entityStorage()): boolean {
+    if (this.entityPersistenceMode === 'none') return false;
     if (this.entityPersistenceMode === 'remote') {
       const seenPublicIds = new Set<string>();
       const queue = (record: any) => {
@@ -2521,12 +2524,14 @@ export class ContraptionManager {
     }
 
     // 4. Periodic entity persistence
-    this.lastEntitySaveTime = (this.lastEntitySaveTime || 0) + dt;
-    const persistenceInterval = this.entityPersistenceMode === 'remote' ? 6.0 : 2.0;
-    if (this.lastEntitySaveTime >= persistenceInterval) {
-      this.lastEntitySaveTime = 0;
-      if (this.contraptions.length > 0 || this.getDormantContraptionCount() > 0) {
-        this.saveEntitiesToStorage();
+    if (this.entityPersistenceMode !== 'none') {
+      this.lastEntitySaveTime = (this.lastEntitySaveTime || 0) + dt;
+      const persistenceInterval = this.entityPersistenceMode === 'remote' ? 6.0 : 2.0;
+      if (this.lastEntitySaveTime >= persistenceInterval) {
+        this.lastEntitySaveTime = 0;
+        if (this.contraptions.length > 0 || this.getDormantContraptionCount() > 0) {
+          this.saveEntitiesToStorage();
+        }
       }
     }
   }
