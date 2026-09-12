@@ -4142,10 +4142,10 @@ export class Contraption {
     this.focusedHighlightNodeId = nodeId;
 
     const materials = {
-      focusedLine: new THREE.LineBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.85 }),
-      focusedFill: new THREE.MeshBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide }),
-      childLine: new THREE.LineBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.85 }),
-      childFill: new THREE.MeshBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide })
+      focusedLine: new THREE.LineBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false }),
+      focusedFill: new THREE.MeshBasicMaterial({ color: 0x00d2d3, transparent: true, opacity: 0.08, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
+      childLine: new THREE.LineBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false }),
+      childFill: new THREE.MeshBasicMaterial({ color: 0x2ed573, transparent: true, opacity: 0.12, depthTest: false, depthWrite: false, side: THREE.DoubleSide })
     };
     this.focusHighlightMaterials = materials;
     this.focusHighlightGeometries = [];
@@ -4190,9 +4190,11 @@ export class Contraption {
     const focusedBlocks = this.blocks.filter(b => (b.entityId || this.rootComponentId) === nodeId);
     createBoxForBlocks(node, focusedBlocks, false);
 
-    // 2. Direct child components (ONLY 1 layer below - node.children) with green breathing light
-    if (node.children) {
-      for (const childId of node.children) {
+    // 2. All descendant child components with green breathing light
+    const subtreeIds = this.collectSubtreeNodeIds(nodeId);
+    if (subtreeIds) {
+      for (const childId of subtreeIds) {
+        if (childId === nodeId) continue;
         const childNode = this.entityNodes.get(childId);
         if (!childNode) continue;
         const childBlocks = this.blocks.filter(b => (b.entityId || this.rootComponentId) === childId);
@@ -4486,10 +4488,13 @@ export class Contraption {
       color: 0xf1c40f,
       linewidth: 2,
       transparent: true,
-      opacity: wasVisible ? 0.9 : 0.0
+      opacity: wasVisible ? 0.9 : 0.0,
+      depthTest: false,
+      depthWrite: false
     });
 
     this.highlightBox = new THREE.LineSegments(edges, mat);
+    this.highlightBox.renderOrder = 30;
     this.highlightBox.position.copy(boxOffset);
     this.rootGroup.add(this.highlightBox);
   }
@@ -4630,6 +4635,7 @@ export class Contraption {
         color: 0xff9f43,
         transparent: true,
         opacity: 0.95,
+        depthTest: false,
         depthWrite: false
       });
       const lines = new THREE.LineSegments(edgeGeo, lineMat);
@@ -4701,17 +4707,25 @@ export class Contraption {
       const segZ = Math.max(1, Math.min(64, Math.round(sz)));
       const box = new THREE.BoxGeometry(sx, sy, sz, segX, segY, segZ);
       const edges = new THREE.EdgesGeometry(box);
+      // The box faces sit exactly on the outermost voxel planes, so depth testing
+      // z-fights with the entity surface (visible as the highlight "clipping
+      // through" the model, especially on a running entity whose render pose is
+      // interpolated). Match the other selector highlights and draw it as a
+      // depth-independent X-ray overlay.
       const lineMat = new THREE.LineBasicMaterial({
         color: 0x00d2d3,
         linewidth: 2,
         transparent: true,
-        opacity: 0.95
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false
       });
       const fillMat = new THREE.MeshBasicMaterial({
         color: 0x48dbfb,
         transparent: true,
         opacity: 0.16,
         side: THREE.DoubleSide,
+        depthTest: false,
         depthWrite: false
       });
 

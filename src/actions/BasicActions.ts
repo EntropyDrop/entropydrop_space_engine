@@ -562,6 +562,110 @@ function executeEntityAction(context: any, command: any) {
       }));
       return actionResult(command.action, MICRO_CELLS_PER_BLOCK, 'subdivided', { subdivided: MICRO_CELLS_PER_BLOCK, removed, empty: false });
     }
+    case 'subdivide-cells': {
+      // Batched sibling of subdivide-standard: convert every standard block that
+      // covers one of `cells` into its 512 micro voxels with a SINGLE entity
+      // rebuild. A micro edit over N standard blocks would otherwise run the
+      // collision/picking/chunk-mesh rebuild N times, which dominated Del/F/P.
+      const list = Array.isArray(command.cells) ? command.cells : [];
+      if (list.length === 0) return actionResult(command.action, 0, 'invalid_position', { subdivided: 0, removed: 0 });
+      const sourceBlocks: any[] = [];
+      for (const item of list) {
+        const cell = finiteCell(item);
+        if (!cell) continue;
+        const block = contraption.blocks.find(candidate => (
+          blockOwnerId(contraption, candidate) === nodeId
+          && (candidate.size || 1) >= 1
+          && blockInCell(candidate, cell)
+        ));
+        if (block && !sourceBlocks.includes(block)) sourceBlocks.push(block);
+      }
+      if (sourceBlocks.length === 0) return actionResult(command.action, 0, 'not_found', { subdivided: 0, removed: 0 });
+
+      const sourceSet = new Set(sourceBlocks);
+      const added: any[] = [];
+      for (const original of sourceBlocks) {
+        const baseX = Math.floor(original.localX + 1e-6);
+        const baseY = Math.floor(original.localY + 1e-6);
+        const baseZ = Math.floor(original.localZ + 1e-6);
+        for (let ix = 0; ix < MICRO_DIVISIONS; ix++) {
+          for (let iy = 0; iy < MICRO_DIVISIONS; iy++) {
+            for (let iz = 0; iz < MICRO_DIVISIONS; iz++) {
+              added.push({
+                localX: baseX + ix * MICRO_SIZE,
+                localY: baseY + iy * MICRO_SIZE,
+                localZ: baseZ + iz * MICRO_SIZE,
+                size: MICRO_SIZE,
+                color: original.color ?? DEFAULT_BLOCK_COLOR,
+                block: original.block || BlockTypes.COLOR_BLOCK,
+                entityId: original.entityId ?? nodeId,
+                ...(original.part ? { part: original.part } : {})
+              });
+            }
+          }
+        }
+      }
+      contraption.blocks = contraption.blocks.filter(block => !sourceSet.has(block)).concat(added);
+      finishEntityMutation(context, contraption, 'subdivide', nodeId, entityMutationEvent(command, {
+        cells: sourceBlocks.slice(0, 64).map(original => [
+          Math.floor(original.localX + 1e-6),
+          Math.floor(original.localY + 1e-6),
+          Math.floor(original.localZ + 1e-6)
+        ]),
+        truncated: sourceBlocks.length > 64,
+        size: MICRO_SIZE,
+        block: sourceBlocks[0].block,
+        color: sourceBlocks[0].color
+      }));
+      const subdivided = sourceBlocks.length * MICRO_CELLS_PER_BLOCK;
+      return actionResult(command.action, subdivided, 'subdivided', { subdivided, removed: 0, empty: false });
+    }
+    case 'fill-blocks': {
+      const coords = Array.isArray(command.coords) ? command.coords : [];
+      const color = resolveColor(command.options ?? command.color);
+      const isMicro = command.micro === true;
+      const blockSize = isMicro ? MICRO_SIZE : 1;
+      let addedCount = 0;
+      let recoloredCount = 0;
+      const blockMap = new Map<string, any>();
+      for (const b of contraption.blocks) {
+        if (blockOwnerId(contraption, b) === nodeId) {
+          const gx = isMicro ? Math.round(b.localX * MICRO_DIVISIONS) : Math.floor(b.localX + 1e-6);
+          const gy = isMicro ? Math.round(b.localY * MICRO_DIVISIONS) : Math.floor(b.localY + 1e-6);
+          const gz = isMicro ? Math.round(b.localZ * MICRO_DIVISIONS) : Math.floor(b.localZ + 1e-6);
+          blockMap.set(`${gx},${gy},${gz}`, b);
+        }
+      }
+      for (const c of coords) {
+        const key = `${c.x},${c.y},${c.z}`;
+        const existing = blockMap.get(key);
+        if (existing) {
+          if (existing.color !== color) {
+            existing.color = color;
+            recoloredCount++;
+          }
+        } else {
+          const localX = isMicro ? c.x * MICRO_SIZE : c.x;
+          const localY = isMicro ? c.y * MICRO_SIZE : c.y;
+          const localZ = isMicro ? c.z * MICRO_SIZE : c.z;
+          contraption.blocks.push({
+            localX,
+            localY,
+            localZ,
+            size: blockSize,
+            color,
+            entityId: nodeId
+          });
+          addedCount++;
+        }
+      }
+      if (addedCount > 0 || recoloredCount > 0) {
+        finishEntityMutation(context, contraption, addedCount > 0 ? 'place' : 'color', nodeId, entityMutationEvent(command, {
+          color
+        }));
+      }
+      return actionResult(command.action, addedCount + recoloredCount, 'filled', { added: addedCount, recolored: recoloredCount, color });
+    }
     case 'paint-blocks': {
       const selectedBlocks = Array.isArray(command.blocks) ? command.blocks : [];
       if (selectedBlocks.length === 0) return actionResult(command.action, 0, 'not_found', { painted: 0 });
@@ -770,7 +874,7 @@ function executeQueryAction(context: any, command: any) {
   const entityDistance = entityHit && Number.isFinite(Number(entityHit.distance))
     ? Number(entityHit.distance)
     : Infinity;
-  const hit = entityDistance <= worldDistance + 1e-4 ? entityHit : (worldHit?.hit ? worldHit : null);
+  const hit = entityDistance <= worldDistance + 0.005 ? entityHit : (worldHit?.hit ? worldHit : null);
   return {
     ok: !!hit,
     action: command.action,
@@ -858,6 +962,15 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
     );
 
     for (const targetNode of contraption.entityNodes.values()) {
+      if (targetNode.id !== nodeId) {
+        const isDescendant = typeof contraption.isEntityDescendantOf === 'function'
+          ? contraption.isEntityDescendantOf(targetNode.id, nodeId)
+          : (targetNode.parentId === nodeId);
+        const isRoot = nodeId === (contraption.rootComponentId || 'root');
+        if (!isDescendant && !isRoot) {
+          continue;
+        }
+      }
       targetNode.group?.updateWorldMatrix?.(true, false);
       let bounds: THREE.Box3;
       if (isWorldSpace) {
@@ -873,18 +986,40 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
       }
       const pivot = targetNode.pivotLocal;
 
+      const matchingMicro: any[] = [];
+      const matchingStandard: any[] = [];
       for (const block of contraption.blocks) {
         if (blockOwnerId(contraption, block) !== targetNode.id) continue;
-        if (microOnly && !isMicroBlock(block)) continue;
+        const isMicro = isMicroBlock(block);
         const size = block.size || 1;
         blockBounds.set(
           new THREE.Vector3(block.localX - pivot.x, block.localY - pivot.y, block.localZ - pivot.z),
           new THREE.Vector3(block.localX + size - pivot.x, block.localY + size - pivot.y, block.localZ + size - pivot.z)
         );
         if (blockBounds.intersectsBox(bounds)) {
-          selected.push(block);
-          componentsSet.add(targetNode.id);
+          if (targetNode.id !== nodeId) {
+            const overlap = blockBounds.clone().intersect(bounds);
+            const dx = Math.max(0, overlap.max.x - overlap.min.x);
+            const dy = Math.max(0, overlap.max.y - overlap.min.y);
+            const dz = Math.max(0, overlap.max.z - overlap.min.z);
+            const eps = isMicro ? 1e-4 : 1e-3;
+            if (dx <= eps || dy <= eps || dz <= eps) {
+              continue;
+            }
+          }
+          if (isMicro) {
+            matchingMicro.push(block);
+          } else {
+            matchingStandard.push(block);
+          }
         }
+      }
+      const toAdd = (microOnly && matchingMicro.length > 0)
+        ? matchingMicro
+        : (microOnly ? matchingStandard : [...matchingMicro, ...matchingStandard]);
+      if (toAdd.length > 0) {
+        selected.push(...toAdd);
+        componentsSet.add(targetNode.id);
       }
     }
     return { selected, components: Array.from(componentsSet).sort() };
@@ -898,16 +1033,27 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
   ).expandByScalar(1e-6);
   const pivot = node.pivotLocal;
   const blockBounds = new THREE.Box3();
-  const selected = contraption.blocks.filter(block => {
-    if (blockOwnerId(contraption, block) !== nodeId) return false;
-    if (microOnly && !isMicroBlock(block)) return false;
+  const matchingMicro: any[] = [];
+  const matchingStandard: any[] = [];
+  for (const block of contraption.blocks) {
+    if (blockOwnerId(contraption, block) !== nodeId) continue;
+    const isMicro = isMicroBlock(block);
     const size = block.size || 1;
     blockBounds.set(
       new THREE.Vector3(block.localX - pivot.x, block.localY - pivot.y, block.localZ - pivot.z),
       new THREE.Vector3(block.localX + size - pivot.x, block.localY + size - pivot.y, block.localZ + size - pivot.z)
     );
-    return blockBounds.intersectsBox(bounds);
-  });
+    if (blockBounds.intersectsBox(bounds)) {
+      if (isMicro) {
+        matchingMicro.push(block);
+      } else {
+        matchingStandard.push(block);
+      }
+    }
+  }
+  const selected = (microOnly && matchingMicro.length > 0)
+    ? matchingMicro
+    : (microOnly ? matchingStandard : [...matchingMicro, ...matchingStandard]);
 
   const components: string[] = [];
   if (selected.length === 0 && node.group) {
@@ -921,7 +1067,6 @@ function entityBoxMatches(contraption: any, nodeId: string, pointA: any, pointB:
       const otherPivot = other.pivotLocal;
       const found = contraption.blocks.some(block => {
         if (blockOwnerId(contraption, block) !== other.id) return false;
-        if (microOnly && !isMicroBlock(block)) return false;
         const size = block.size || 1;
         blockBounds.set(
           new THREE.Vector3(block.localX - otherPivot.x, block.localY - otherPivot.y, block.localZ - otherPivot.z),
