@@ -1,4 +1,4 @@
-import { MICRO_DIVISIONS, MICRO_SIZE, MICRO_CELLS_PER_BLOCK } from '../voxel/MicroGrid.ts';
+import { MICRO_DIVISIONS, MICRO_SIZE } from '../voxel/MicroGrid.ts';
 import {
   createFileRegistry,
   fromBinary,
@@ -24,14 +24,14 @@ import {
 } from '../generated/inventory.ts';
 import { INVENTORY_DESCRIPTOR_SET_BYTES } from '../generated/inventory_descriptor.ts';
 
-export const INVENTORY_PROTOBUF_SCHEMA_VERSION = 6;
-export const BACKPACK_PROTOBUF_SCHEMA_VERSION = 7;
+export const INVENTORY_PROTOBUF_SCHEMA_VERSION = 7;
+export const BACKPACK_PROTOBUF_SCHEMA_VERSION = 8;
 export const INVENTORY_PROTOBUF_MIME = 'application/x-protobuf';
 export const MAX_BACKPACK_SLOTS_PER_CATEGORY = 99;
 export type InventoryKind = 'blockset' | 'entity' | 'colorset';
 
 export interface PortableBackpack {
-  sourceSchemaVersion?: 7;
+  sourceSchemaVersion?: 8;
   activeCategory: InventoryKind;
   categories: Record<InventoryKind, {
     selected: number;
@@ -87,10 +87,10 @@ function requiredMessageDescriptor(typeName: string): DescMessage {
 }
 
 const INVENTORY_RESOURCE_DESCRIPTOR = requiredMessageDescriptor(
-  'entropydrop.space.inventory.v6.InventoryResource',
+  'entropydrop.space.inventory.v7.InventoryResource',
 );
 const BACKPACK_DESCRIPTOR = requiredMessageDescriptor(
-  'entropydrop.space.backpack.v7.Backpack',
+  'entropydrop.space.backpack.v8.Backpack',
 );
 
 function scalarWireType(type: ScalarType): WireType {
@@ -281,16 +281,26 @@ function quaternionArray(value: Quaternion | undefined): number[] | undefined {
     : undefined;
 }
 
+/** Validate one cell-local micro offset against the shared 8-division grid. */
+function microOffset(value: unknown, axis: 'x' | 'y' | 'z'): number {
+  const offset = Number(value);
+  if (!Number.isInteger(offset) || offset < 0 || offset >= MICRO_DIVISIONS) {
+    throw new Error(`Micro voxel ${axis} offset must be an integer in 0..${MICRO_DIVISIONS - 1}.`);
+  }
+  return offset;
+}
+
 function voxelMessage(block: any): Voxel {
   const micro = block.mx !== undefined && block.mx !== null;
   return {
     dx: Number(block.dx),
     dy: Number(block.dy),
     dz: Number(block.dz),
-    microIndex: micro
-      ? 1 + Number(block.mx) + MICRO_DIVISIONS * Number(block.my) + MICRO_DIVISIONS ** 2 * Number(block.mz)
-      : undefined,
-    color: Number(block.color) >>> 0,
+    isMicro: micro,
+    microX: micro ? microOffset(block.mx, 'x') : 0,
+    microY: micro ? microOffset(block.my, 'y') : 0,
+    microZ: micro ? microOffset(block.mz, 'z') : 0,
+    colorRgb: Number(block.color) >>> 0,
   };
 }
 
@@ -300,21 +310,17 @@ function portableVoxel(block: Voxel): any {
     dy: Number(block.dy),
     dz: Number(block.dz),
     block: 1,
-    color: Number(block.color) >>> 0,
+    color: Number(block.colorRgb) >>> 0,
   };
-  if (block.microIndex !== undefined) {
-    const packed = Number(block.microIndex) - 1;
-    if (!Number.isInteger(packed) || packed < 0 || packed >= MICRO_CELLS_PER_BLOCK) {
-      throw new Error('Micro voxel index is outside 0..511.');
-    }
-    portable.mx = packed % MICRO_DIVISIONS;
-    portable.my = Math.floor(packed / MICRO_DIVISIONS) % MICRO_DIVISIONS;
-    portable.mz = Math.floor(packed / MICRO_DIVISIONS ** 2);
+  if (block.isMicro) {
+    portable.mx = microOffset(block.microX, 'x');
+    portable.my = microOffset(block.microY, 'y');
+    portable.mz = microOffset(block.microZ, 'z');
   }
   return portable;
 }
 
-/** Copy only the fields carried by the portable v6 voxel shape. */
+/** Copy only the fields carried by the portable v7 voxel shape. */
 function portableVoxelFields(block: any): any {
   const portable: any = {
     dx: canonicalDouble(block?.dx),
@@ -799,7 +805,7 @@ function previewVoxel(block: any, entity: boolean): any {
   return preview;
 }
 
-/** Convert portable v6 coordinates into the runtime shape used by thumbnail rendering. */
+/** Convert portable v7 coordinates into the runtime shape used by thumbnail rendering. */
 export function inventoryResourcePreviewItem(category: InventoryKind, portable: any): any {
   if (category === 'colorset') {
     return {

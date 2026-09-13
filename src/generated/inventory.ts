@@ -7,7 +7,7 @@
 /* eslint-disable */
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 
-export const protobufPackage = "entropydrop.space.inventory.v6";
+export const protobufPackage = "entropydrop.space.inventory.v7";
 
 export const BodyType = { BODY_TYPE_DYNAMIC: 0, BODY_TYPE_KINEMATIC: 1, UNRECOGNIZED: -1 } as const;
 
@@ -39,10 +39,18 @@ export namespace ConstraintType {
  * Canonical binary contract for portable files, market uploads, and immutable
  * CDN objects. Derived counts and the constant block id
  * are intentionally omitted.
+ * Voxel geometry follows the authoritative realtime schema
+ * `space.multiplayer.v2` (see entropydrop_backend/space/contracts/protocol.proto):
+ * micro offsets are separate `micro_x`/`micro_y`/`micro_z` fields in 0..7 guarded
+ * by `is_micro`, and color is an unsigned `color_rgb` varint instead of a
+ * `fixed32`. This file is the single source for portable content; the realtime
+ * protocol must be updated together with it.
  * Canonical encoders normalize every double -0.0 to +0.0; sort BlockSet.blocks
- * and Component.blocks by (dx,dy,dz,micro coordinates,color); and sort
- * Component.children and Entity.constraints by Unicode code-point id order.
- * Color and seat order remains significant and is preserved.
+ * and Component.blocks by (dx,dy,dz,is_micro,micro_x,micro_y,micro_z,color_rgb);
+ * and sort Component.children and Entity.constraints by Unicode code-point id
+ * order. Color and seat order remains significant and is preserved.
+ * Schema v7 is a wire-breaking change: v6 files, backpacks and CDN objects are
+ * intentionally rejected and are not migrated.
  */
 export interface InventoryResource {
   schemaVersion?: number | undefined;
@@ -58,9 +66,28 @@ export interface Voxel {
   dz?:
     | number
     | undefined;
-  /** Present only for micro voxels. Value = 1 + mx + 8*my + 64*mz (mx/my/mz in 0..7). */
-  microIndex?: number | undefined;
-  color?: number | undefined;
+  /**
+   * False selects the standard 1 m voxel. True selects the micro voxel at the
+   * cell-local offset below; this mirrors VoxelMutationKind in the realtime
+   * schema instead of the removed packed `micro_index`.
+   */
+  isMicro?:
+    | boolean
+    | undefined;
+  /**
+   * Cell-local micro offsets, each in 0..7. Meaningful only when is_micro is
+   * true; canonical encoders emit 0 for the standard scale.
+   */
+  microX?: number | undefined;
+  microY?: number | undefined;
+  microZ?:
+    | number
+    | undefined;
+  /**
+   * RGB packed as 0xRRGGBB. Matches VoxelMutation.color_rgb in the realtime
+   * schema; the old `fixed32 color` wire type is no longer accepted.
+   */
+  colorRgb?: number | undefined;
 }
 
 export interface BlockSet {
@@ -69,7 +96,10 @@ export interface BlockSet {
 }
 
 export interface ColorSet {
-  name?: string | undefined;
+  name?:
+    | string
+    | undefined;
+  /** Packed 0xRRGGBB values, matching Voxel.color_rgb. */
   colors?: number[] | undefined;
 }
 
@@ -288,7 +318,7 @@ export const InventoryResource: MessageFns<InventoryResource> = {
 };
 
 function createBaseVoxel(): Voxel {
-  return { dx: 0, dy: 0, dz: 0, microIndex: undefined, color: 0 };
+  return { dx: 0, dy: 0, dz: 0, isMicro: false, microX: 0, microY: 0, microZ: 0, colorRgb: 0 };
 }
 
 export const Voxel: MessageFns<Voxel> = {
@@ -302,11 +332,20 @@ export const Voxel: MessageFns<Voxel> = {
     if (message.dz !== undefined && message.dz !== 0) {
       writer.uint32(24).sint32(message.dz);
     }
-    if (message.microIndex !== undefined) {
-      writer.uint32(32).uint32(message.microIndex);
+    if (message.isMicro !== undefined && message.isMicro !== false) {
+      writer.uint32(32).bool(message.isMicro);
     }
-    if (message.color !== undefined && message.color !== 0) {
-      writer.uint32(45).fixed32(message.color);
+    if (message.microX !== undefined && message.microX !== 0) {
+      writer.uint32(40).uint32(message.microX);
+    }
+    if (message.microY !== undefined && message.microY !== 0) {
+      writer.uint32(48).uint32(message.microY);
+    }
+    if (message.microZ !== undefined && message.microZ !== 0) {
+      writer.uint32(56).uint32(message.microZ);
+    }
+    if (message.colorRgb !== undefined && message.colorRgb !== 0) {
+      writer.uint32(64).uint32(message.colorRgb);
     }
     return writer;
   },
@@ -353,15 +392,39 @@ export const Voxel: MessageFns<Voxel> = {
               break;
             }
 
-            message.microIndex = reader.uint32();
+            message.isMicro = reader.bool();
             continue;
           }
           case 5: {
-            if (tag !== 45) {
+            if (tag !== 40) {
               break;
             }
 
-            message.color = reader.fixed32();
+            message.microX = reader.uint32();
+            continue;
+          }
+          case 6: {
+            if (tag !== 48) {
+              break;
+            }
+
+            message.microY = reader.uint32();
+            continue;
+          }
+          case 7: {
+            if (tag !== 56) {
+              break;
+            }
+
+            message.microZ = reader.uint32();
+            continue;
+          }
+          case 8: {
+            if (tag !== 64) {
+              break;
+            }
+
+            message.colorRgb = reader.uint32();
             continue;
           }
         }
@@ -384,8 +447,11 @@ export const Voxel: MessageFns<Voxel> = {
     message.dx = object.dx ?? 0;
     message.dy = object.dy ?? 0;
     message.dz = object.dz ?? 0;
-    message.microIndex = object.microIndex ?? undefined;
-    message.color = object.color ?? 0;
+    message.isMicro = object.isMicro ?? false;
+    message.microX = object.microX ?? 0;
+    message.microY = object.microY ?? 0;
+    message.microZ = object.microZ ?? 0;
+    message.colorRgb = object.colorRgb ?? 0;
     return message;
   },
 };
@@ -474,7 +540,7 @@ export const ColorSet: MessageFns<ColorSet> = {
     if (message.colors !== undefined && message.colors.length !== 0) {
       writer.uint32(18).fork();
       for (const v of message.colors) {
-        writer.fixed32(v);
+        writer.uint32(v);
       }
       writer.join();
     }
@@ -503,8 +569,8 @@ export const ColorSet: MessageFns<ColorSet> = {
             continue;
           }
           case 2: {
-            if (tag === 21) {
-              message.colors!.push(reader.fixed32());
+            if (tag === 16) {
+              message.colors!.push(reader.uint32());
 
               continue;
             }
@@ -512,7 +578,7 @@ export const ColorSet: MessageFns<ColorSet> = {
             if (tag === 18) {
               const end2 = reader.uint32() + reader.pos;
               while (reader.pos < end2) {
-                message.colors!.push(reader.fixed32());
+                message.colors!.push(reader.uint32());
               }
 
               continue;

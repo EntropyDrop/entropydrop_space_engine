@@ -1,11 +1,14 @@
 syntax = "proto3";
 
-package entropydrop.space.backpack.v7;
+package entropydrop.space.backpack.v8;
 
 import "inventory.proto";
 
 // Browser-local UI state. Backpack messages are never uploaded to the market;
 // only InventoryResource crosses the frontend/backend boundary.
+// Backpack v8 embeds `entropydrop.space.inventory.v7.InventoryResource`, so the
+// browser-local blob version tracks the wire-breaking inventory bump. v7
+// backpacks are intentionally ignored, not migrated.
 enum InventoryCategory {
   INVENTORY_CATEGORY_BLOCK_SET = 0;
   INVENTORY_CATEGORY_ENTITY = 1;
@@ -15,7 +18,7 @@ enum InventoryCategory {
 // The repeated BackpackSlot position is the local UI slot position. Empty
 // wrappers preserve internal gaps, and trailing empty slots are omitted.
 message BackpackSlot {
-  entropydrop.space.inventory.v6.InventoryResource resource = 1;
+  entropydrop.space.inventory.v7.InventoryResource resource = 1;
 }
 
 message InventoryGroup {

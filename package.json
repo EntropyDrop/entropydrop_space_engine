@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24", "npm": ">=10" },
+  "engines": {
+    "node": ">=24",
+    "npm": ">=10"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./package.json": "./package.json",
@@ -14,11 +17,12 @@
   "scripts": {
     "generate:protobuf": "node tools/generate-protobuf.mjs",
     "check:protobuf": "node tools/generate-protobuf.mjs --check",
+    "check:buf": "BUF_CACHE_DIR=.buf-cache buf lint proto",
     "docs:generate": "node tools/generate-api-docs.ts",
     "docs:check": "node tools/generate-api-docs.ts --check",
     "typecheck": "tsc --noEmit",
     "test": "node --import ./test/setup.ts --test --test-concurrency=1 \"test/*.test.ts\"",
-    "check": "npm run check:protobuf && npm run docs:check && npm run typecheck && npm test"
+    "check": "npm run check:protobuf && npm run check:buf && npm run docs:check && npm run typecheck && npm test"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.1",
@@ -27,8 +31,11 @@
     "quickjs-emscripten-core": "0.32.0",
     "simplex-noise": "^4.0.3"
   },
-  "peerDependencies": { "three": "^0.183.2" },
+  "peerDependencies": {
+    "three": "^0.183.2"
+  },
   "devDependencies": {
+    "@bufbuild/buf": "1.73.0",
     "@types/node": "^24.10.1",
     "@types/three": "^0.183.1",
     "three": "^0.183.2",

@@ -7,6 +7,7 @@ import { InventoryResource } from '../src/generated/inventory.ts';
 import {
   BACKPACK_PROTO_SOURCE_SHA256,
   INVENTORY_PROTO_SOURCE_SHA256,
+  SPACE_API_PROTO_SOURCE_SHA256,
 } from '../src/generated/inventory_descriptor.ts';
 import {
   decodeBackpack,
@@ -19,20 +20,22 @@ import {
 } from '../src/storage/InventoryProtobuf.ts';
 
 
-const CROSS_LANGUAGE_BLOCKSET_HEX = '080652150a0543726f7373120c08011004209d012d34ab1200';
-const CROSS_LANGUAGE_CANONICAL_ENTITY_HEX = '08065a5a122c0a05776f726c641a0022052d0100000042070a01421a020801420a0a04726f6f741a02080162054f726465721a0f0a014122014261cdccccccccccec3f1a190a017a1a05776f726c642204726f6f7461cdccccccccccec3f';
+const CROSS_LANGUAGE_BLOCKSET_HEX = '080752190a0543726f7373121008011004200128043003380240b4d64a';
+const CROSS_LANGUAGE_CANONICAL_ENTITY_HEX = '08075a5712290a05776f726c641a002202400142070a01421a020801420a0a04726f6f741a02080162054f726465721a0f0a014122014261cdccccccccccec3f1a190a017a1a05776f726c642204726f6f7461cdccccccccccec3f';
 
 test('checked-in protobuf bindings and descriptor match the source schema', () => {
   const inventory = readFileSync(new URL('../proto/inventory.proto', import.meta.url));
   const backpack = readFileSync(new URL('../proto/backpack.proto', import.meta.url));
+  const spaceApi = readFileSync(new URL('../proto/space_api.proto', import.meta.url));
   assert.equal(createHash('sha256').update(inventory).digest('hex'), INVENTORY_PROTO_SOURCE_SHA256);
   assert.equal(createHash('sha256').update(backpack).digest('hex'), BACKPACK_PROTO_SOURCE_SHA256);
+  assert.equal(createHash('sha256').update(spaceApi).digest('hex'), SPACE_API_PROTO_SOURCE_SHA256);
 });
 
 test('inventory Protobuf has the same deterministic wire bytes as the backend codec', () => {
   const encoded = encodeInventoryResource('blockset', {
     type: 'space-blockset',
-    version: 6,
+    version: 7,
     name: 'Cross',
     blocks: [{ dx: -1, dy: 2, dz: 0, mx: 4, my: 3, mz: 2, color: 0x12ab34 }],
   });
@@ -44,25 +47,25 @@ test('inventory Protobuf has the same deterministic wire bytes as the backend co
   });
 });
 
-test('inventory encoder accepts only portable v6 resource shapes', () => {
+test('inventory encoder accepts only portable v7 resource shapes', () => {
   assert.throws(() => encodeInventoryResource('blockset', {
     type: 'space-blockset', version: 4, name: 'old', blocks: [],
-  }), /space-blockset v6/i);
+  }), /space-blockset v7/i);
   assert.throws(() => encodeInventoryResource('colorset', {
     type: 'space-colorset', version: 4, name: 'old', colors: [],
-  }), /space-colorset v6/i);
+  }), /space-colorset v7/i);
   assert.throws(() => encodeInventoryResource('entity', {
     type: 'space-entity', version: 4, root: { name: 'old' }, constraints: [],
-  }), /space-entity v6/i);
+  }), /space-entity v7/i);
   assert.throws(() => encodeInventoryResource('entity', {
-    type: 'space-entity', version: 6, name: 'obsolete', root: {}, constraints: [],
+    type: 'space-entity', version: 7, name: 'obsolete', root: {}, constraints: [],
   }), /root.name/);
 });
 
 test('inventory encoding uses the backend canonical ordering at every resource boundary', () => {
   const blockSet = decodeInventoryResource(encodeInventoryResource('blockset', {
     type: 'space-blockset',
-    version: 6,
+    version: 7,
     name: 'Order',
     blocks: [
       { dx: 0, dy: 0, dz: 0, mx: 1, my: 0, mz: 0, color: 3 },
@@ -80,7 +83,7 @@ test('inventory encoding uses the backend canonical ordering at every resource b
 
   const portableEntity: any = {
     type: 'space-entity',
-    version: 6,
+    version: 7,
     root: {
       name: 'Order',
       id: 'world',
@@ -117,7 +120,7 @@ test('inventory encoding uses the backend canonical ordering at every resource b
 
 test('entity decoding makes sibling and constraint wire order non-semantic', () => {
   const encoded = InventoryResource.encode({
-    schemaVersion: 6,
+    schemaVersion: 7,
     content: {
       $case: 'entity',
       value: {
@@ -274,7 +277,7 @@ test('runtime-to-portable projection drops legacy and unknown in-memory fields',
 test('portable-to-runtime projection drops legacy aliases and arbitrary fields', () => {
   const runtime = portableEntityToRuntime({
     type: 'space-entity',
-    version: 6,
+    version: 7,
     root: {
       name: 'Projected',
       id: 'alpha',
@@ -348,7 +351,7 @@ test('portable-to-runtime projection drops legacy aliases and arbitrary fields',
 
 test('oneof decoding follows protobuf last-member-wins semantics', () => {
   const blockSetThenEntity = Buffer.from(
-    '0806520a0a014212052d010000005a140a0145120f0a04726f6f741a0022052d01000000',
+    '0807520a0a014212052d010000005a140a0145120f0a04726f6f741a0022052d01000000',
     'hex',
   );
   const message = InventoryResource.decode(blockSetThenEntity);
@@ -357,7 +360,7 @@ test('oneof decoding follows protobuf last-member-wins semantics', () => {
 });
 
 test('descriptor-driven decoding matches standard protobuf merge and invalid-wire semantics', () => {
-  const splitBlockSet = Buffer.from('080652030a0142520412020801', 'hex');
+  const splitBlockSet = Buffer.from('080752030a0142520412020801', 'hex');
   const merged = decodeInventoryResource(splitBlockSet);
   assert.equal(merged.category, 'blockset');
   assert.equal(merged.portable.name, 'B');
@@ -375,7 +378,7 @@ test('descriptor-driven decoding matches standard protobuf merge and invalid-wir
   );
   assert.throws(
     () => decodeInventoryResource(Buffer.from(
-      '08065a160a014512110a04726f6f741a0022052d010000003a00',
+      '08075a160a014512110a04726f6f741a0022052d010000003a00',
       'hex',
     )),
     /seat without a position/i,
@@ -383,7 +386,7 @@ test('descriptor-driven decoding matches standard protobuf merge and invalid-wir
 
   assert.throws(
     () => decodeInventoryResource(Buffer.from('090352050a01781200', 'hex')),
-    /expected inventory protobuf v6/i,
+    /expected inventory protobuf v7/i,
   );
   const wrongWireThenValid = Buffer.from(
     `090000000000000000${CROSS_LANGUAGE_BLOCKSET_HEX}`,
@@ -391,12 +394,12 @@ test('descriptor-driven decoding matches standard protobuf merge and invalid-wir
   );
   assert.equal(decodeInventoryResource(wrongWireThenValid).portable.name, 'Cross');
   assert.equal(
-    decodeInventoryResource(Buffer.from('080652005001', 'hex')).category,
+    decodeInventoryResource(Buffer.from('080752005001', 'hex')).category,
     'blockset',
   );
 
   const bomRoot = decodeInventoryResource(Buffer.from(
-    '08065a120a0178120d0a07efbbbf726f6f741a002200',
+    '08075a120a0178120d0a07efbbbf726f6f741a002200',
     'hex',
   ));
   assert.equal(bomRoot.portable.root.id, '\ufeffroot');
@@ -405,7 +408,7 @@ test('descriptor-driven decoding matches standard protobuf merge and invalid-wir
 test('canonical encoding normalizes negative zero while retaining optional field presence', () => {
   const negativeZero = {
     type: 'space-entity',
-    version: 6,
+    version: 7,
     root: {
       name: 'Zero',
       id: 'world',
@@ -481,12 +484,12 @@ test('canonical encoding normalizes negative zero while retaining optional field
 test('backpack decoder rejects a resource placed in the wrong category group', () => {
   const colorSet = InventoryResource.decode(encodeInventoryResource('colorset', {
     type: 'space-colorset',
-    version: 6,
+    version: 7,
     name: 'Palette',
     colors: new Array(9).fill('#123456'),
   }));
   const encoded = Backpack.encode({
-    schemaVersion: 7,
+    schemaVersion: 8,
     activeCategory: 0,
     blockSets: { selected: 0, slots: [{ resource: colorSet }] },
     entities: undefined,
@@ -495,16 +498,16 @@ test('backpack decoder rejects a resource placed in the wrong category group', (
   assert.throws(() => decodeBackpack(encoded), /blockset group contains a colorset/);
 });
 
-test('backpack v7 positional wrappers preserve sparse slots and reject older schemas', () => {
+test('backpack v8 positional wrappers preserve sparse slots and reject older schemas', () => {
   const currentBytes = encodeBackpack({
     activeCategory: 'blockset',
     categories: {
       blockset: {
         selected: 5,
         items: [
-          { type: 'space-blockset', version: 6, name: 'First', blocks: [{ dx: 0, dy: 0, dz: 0, color: 1 }] },
+          { type: 'space-blockset', version: 7, name: 'First', blocks: [{ dx: 0, dy: 0, dz: 0, color: 1 }] },
           null, null, null, null,
-          { type: 'space-blockset', version: 6, name: 'Sixth', blocks: [{ dx: 1, dy: 0, dz: 0, color: 2 }] },
+          { type: 'space-blockset', version: 7, name: 'Sixth', blocks: [{ dx: 1, dy: 0, dz: 0, color: 2 }] },
         ],
       },
       entity: { selected: 0, items: [] },
@@ -512,26 +515,26 @@ test('backpack v7 positional wrappers preserve sparse slots and reject older sch
     },
   });
   const currentMessage = Backpack.decode(currentBytes);
-  assert.equal(currentMessage.schemaVersion, 7);
+  assert.equal(currentMessage.schemaVersion, 8);
   assert.equal(currentMessage.blockSets?.slots?.length, 6);
   assert.equal('index' in currentMessage.blockSets!.slots![0], false);
   assert.equal(currentMessage.blockSets?.slots?.[1].resource, undefined);
 
   const current = decodeBackpack(currentBytes);
-  assert.equal(current.sourceSchemaVersion, 7);
+  assert.equal(current.sourceSchemaVersion, 8);
   assert.equal(current.categories.blockset.items[0].name, 'First');
   assert.equal(current.categories.blockset.items[1], null);
   assert.equal(current.categories.blockset.items[5].name, 'Sixth');
   assert.equal(current.categories.blockset.selected, 5);
 
-  const oldVersion = Backpack.encode({ schemaVersion: 6 }).finish();
-  assert.throws(() => decodeBackpack(oldVersion), /expected backpack protobuf v7/i);
+  const oldVersion = Backpack.encode({ schemaVersion: 7 }).finish();
+  assert.throws(() => decodeBackpack(oldVersion), /expected backpack protobuf v8/i);
 });
 
 test('market preview conversion preserves full resources and expands micro voxel coordinates', () => {
   const blockSet = inventoryResourcePreviewItem('blockset', {
     type: 'space-blockset',
-    version: 6,
+    version: 7,
     name: 'Micro',
     blocks: [{
       dx: 2,
@@ -555,7 +558,7 @@ test('market preview conversion preserves full resources and expands micro voxel
   });
   assert.deepEqual(blockSet, {
     type: 'space-blockset',
-    version: 6,
+    version: 7,
     name: 'Micro',
     kind: 'blockset',
     blockCount: 1,
@@ -574,7 +577,7 @@ test('market preview conversion preserves full resources and expands micro voxel
 
   const colorSet = inventoryResourcePreviewItem('colorset', {
     type: 'space-colorset',
-    version: 6,
+    version: 7,
     name: 'Nine',
     colors: ['#000000', '#111111'],
     index: 3,
@@ -584,7 +587,7 @@ test('market preview conversion preserves full resources and expands micro voxel
   });
   assert.deepEqual(colorSet, {
     type: 'space-colorset',
-    version: 6,
+    version: 7,
     name: 'Nine',
     kind: 'colorset',
     colors: ['#000000', '#111111'],
@@ -592,7 +595,7 @@ test('market preview conversion preserves full resources and expands micro voxel
 
   const entity = inventoryResourcePreviewItem('entity', {
     type: 'space-entity',
-    version: 6,
+    version: 7,
     root: {
       name: 'Arm',
       id: 'world', body: { type: 'dynamic', unknown: 'drop-me' }, blocks: [], seats: [], children: [{
@@ -667,17 +670,22 @@ test('market preview conversion preserves full resources and expands micro voxel
   assert.equal(Object.hasOwn(entity.childEntities[0], 'kind'), false);
 });
 
-test('inventory v6 round-trips every offset in an 8x8x8 cell, including index 512', () => {
+test('inventory v7 round-trips every offset in an 8x8x8 cell, including 7,7,7', () => {
   const blocks = [];
   for (let mx = 0; mx < 8; mx++) for (let my = 0; my < 8; my++) for (let mz = 0; mz < 8; mz++) {
     blocks.push({ dx: -1, dy: 255, dz: 0, mx, my, mz, block: 1, color: mx + 8 * my + 64 * mz });
   }
-  const encoded = encodeInventoryResource('blockset', { type: 'space-blockset', version: 6, name: 'Grid', blocks });
+  const encoded = encodeInventoryResource('blockset', { type: 'space-blockset', version: 7, name: 'Grid', blocks });
   const decoded = decodeInventoryResource(encoded, 'blockset').portable;
   assert.equal(decoded.blocks.length, 512);
   assert.equal(new Set(decoded.blocks.map(b => `${b.mx},${b.my},${b.mz}`)).size, 512);
   assert.ok(decoded.blocks.some(b => b.mx === 7 && b.my === 7 && b.mz === 7 && b.color === 511));
   const wire = InventoryResource.decode(encoded);
   assert.equal(wire.content?.$case, 'blockSet');
-  assert.ok(wire.content?.$case === 'blockSet' && wire.content.value.blocks.some(b => b.microIndex === 512));
+  assert.ok(
+    wire.content?.$case === 'blockSet'
+    && wire.content.value.blocks.some(
+      b => b.isMicro === true && b.microX === 7 && b.microY === 7 && b.microZ === 7 && b.colorRgb === 511,
+    ),
+  );
 });

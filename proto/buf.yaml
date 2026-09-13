@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Enum zero values are semantic (BODY_TYPE_DYNAMIC, CONSTRAINT_TYPE_POINT, ...)
+    # and the versioned package names intentionally do not mirror the proto directory.
+    # The directory intentionally carries three independently versioned packages
+    # (inventory.v7, backpack.v8, api.v2) side by side.
+    - ENUM_ZERO_VALUE_SUFFIX
+    - PACKAGE_DIRECTORY_MATCH
+    - DIRECTORY_SAME_PACKAGE
+breaking:
+  use:
+    - FILE

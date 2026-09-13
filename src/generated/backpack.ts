@@ -8,11 +8,14 @@
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 import { InventoryResource } from "./inventory.ts";
 
-export const protobufPackage = "entropydrop.space.backpack.v7";
+export const protobufPackage = "entropydrop.space.backpack.v8";
 
 /**
  * Browser-local UI state. Backpack messages are never uploaded to the market;
  * only InventoryResource crosses the frontend/backend boundary.
+ * Backpack v8 embeds `entropydrop.space.inventory.v7.InventoryResource`, so the
+ * browser-local blob version tracks the wire-breaking inventory bump. v7
+ * backpacks are intentionally ignored, not migrated.
  */
 export const InventoryCategory = {
   INVENTORY_CATEGORY_BLOCK_SET: 0,

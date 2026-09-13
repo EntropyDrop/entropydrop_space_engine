@@ -53,22 +53,30 @@ import { ContraptionPhysics } from '@entropydrop/space-engine/physics/Contraptio
 
 ## Contracts and validation
 
-`npm run check` verifies generated Protobuf files and API docs, typechecks the package,
-and runs engine tests. Protobuf generation/checks require `protoc` on PATH; the TypeScript
-generator is a local dev dependency. Use `npm run generate:protobuf` after changing
-`proto/`, and `npm run docs:generate` after changing `src/contraption/ScriptApiContract.ts`.
-Generated files are checked in, so ordinary consumer builds do not need `protoc`.
+`proto/` owns the shared contracts and their versioning rules (see
+[`proto/README.md`](proto/README.md)): `inventory.proto` (portable resource, v7),
+`backpack.proto` (browser-local state, v8) and `space_api.proto`
+(`entropydrop.space.api.v2` binary REST request envelopes). `npm run check` verifies the
+generated Protobuf files, lints the schemas with the pinned `@bufbuild/buf` CLI,
+verifies the API docs, typechecks the package, and runs engine tests.
+Protobuf generation/checks require `protoc` on PATH; the TypeScript generator is a local
+dev dependency. Use `npm run generate:protobuf` after changing `proto/`, and
+`npm run docs:generate` after changing `src/contraption/ScriptApiContract.ts`. Generated
+files are checked in, so ordinary consumer builds do not need `protoc`.
 
-The Python backend keeps its generated binding under `space/contracts/`; the only
-resource schema source is `proto/inventory.proto` here. To regenerate that binding from
-the backend root (using protoc 33.2 to match the checked-in Python runtime version):
+The Python backend keeps its generated bindings under `space/contracts/`. To regenerate
+them from the backend root (using protoc 33.2 to match the checked-in Python runtime
+version):
 
 ```sh
 protoc --proto_path=space/contracts=../entropydrop_space_engine/proto --python_out=. space/contracts/inventory.proto
+protoc --proto_path=space/contracts=../entropydrop_space_engine/proto --python_out=. space/contracts/space_api.proto
 ```
 
-The virtual proto path preserves the Python module name and descriptor identity. Moving
-these files does not change the wire format or database schema. Frontend `npm run check:space` also runs the
+`entropydrop_backend/space/sync_agent_docs.py --check --protobuf` verifies those bindings
+and the public agent reference copies against this repository. The virtual proto path
+preserves the Python module name and descriptor identity. Moving these files does not
+change the wire format or database schema. Frontend `npm run check:space` also runs the
 engine checks and browser integration tests.
 
 Rebuild both consumers after shared physics/script/codec changes. The optional hosting
@@ -107,7 +115,7 @@ Torus queries unwrap these boxes into the caller's periodic window.
 
 The construction grid is 8×8×8: 512 cells of 0.125 m per standard 1 m block.
 The pure `src/voxel/MicroGrid.ts` constants are shared by editing, geometry, physics,
-inventory and the browser. Inventory v6, backpack v7, offline entities v4, local
+inventory and the browser. Inventory v7, backpack v8, offline entities v4, local
 world edits v3 and far-surface snapshots v3 intentionally reject older formats.
 Backend deployment requires fresh Space content/storage; no historical migration
 or automatic deletion is included.
