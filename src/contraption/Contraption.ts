@@ -2702,7 +2702,9 @@ export class Contraption {
   // BOUNDS & MESH GENERATION
   // =========================================================================
 
-  private static readonly COLLISION_REGION_SIZE = 32 * MICRO_DIVISIONS;
+  private static get COLLISION_REGION_SIZE(): number {
+    return 32 * MICRO_DIVISIONS;
+  }
 
   private static getCollisionRegionKey(x: number, y: number, z: number): string {
     const reg = Contraption.COLLISION_REGION_SIZE;
