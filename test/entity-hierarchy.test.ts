@@ -1077,11 +1077,88 @@ test('component seats are pivot-relative and nearest-seat lookup follows articul
   assert.ok(rotatedSeat.distanceTo(armSeat) > 0.5, 'child seats must follow the component transform');
 
   const slot = contraption.serializeSubtree('root');
-  assert.deepEqual(slot.seats, [{ position: [1, 0, 0] }]);
+  assert.deepEqual(slot.seats, [{ position: [1, 0, 0], rotation: [0, 0, 0, 1], fixedOrientation: false }]);
   assert.deepEqual(slot.childEntities[0].seats, [
-    { position: [0, 1, 0] },
-    { position: [2, 0, 0] }
+    { position: [0, 1, 0], rotation: [0, 0, 0, 1], fixedOrientation: false },
+    { position: [2, 0, 0], rotation: [0, 0, 0, 1], fixedOrientation: false }
   ]);
+});
+
+test('seat orientation and fixed-orientation flag follow the component pose', () => {
+  const contraption = new Contraption(
+    99,
+    [standardBlock(0)],
+    new THREE.Vector3(),
+    new THREE.Scene(),
+    {
+      seats: [
+        { position: [0, 1, 0], fixedOrientation: true },
+        { position: [1, 0, 0], rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2] },
+        { position: [2, 0, 0], rotation: [0, 0, 0, 0] }
+      ]
+    }
+  ) as any;
+
+  // The identity default is preserved, the quarter turn is normalized, and a
+  // degenerate quaternion rejects only that seat.
+  assert.equal(contraption.getComponentSeats('root').length, 2);
+  assert.deepEqual(contraption.getComponentSeats('root')[0], {
+    position: [0, 1, 0],
+    rotation: [0, 0, 0, 1],
+    fixedOrientation: true
+  });
+  assert.deepEqual(contraption.getComponentSeats('root')[1].rotation, [0, Math.SQRT1_2, 0, Math.SQRT1_2]);
+
+  // Identity seat orientation resolves to the component world orientation.
+  const identity = contraption.getSeatWorldQuaternion('root', 0);
+  assert.ok(identity.angleTo(new THREE.Quaternion()) < 1e-6);
+
+  // The authored quarter turn is applied inside the component frame.
+  const quarterTurn = contraption.getSeatWorldQuaternion('root', 1);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(quarterTurn);
+  assert.ok(forward.distanceTo(new THREE.Vector3(-1, 0, 0)) < 1e-6, 'seat rotation must rotate rider forward');
+
+  // Root yaw drives the seat, so a mounted rider inherits the vehicle swing.
+  contraption.quaternion.setFromEuler(new THREE.Euler(0, Math.PI / 2, 0));
+  contraption.updateTransform();
+  const swung = contraption.getSeatWorldQuaternion('root', 0);
+  const swungForward = new THREE.Vector3(0, 0, -1).applyQuaternion(swung);
+  assert.ok(swungForward.distanceTo(new THREE.Vector3(-1, 0, 0)) < 1e-6, 'seat must follow root rotation');
+
+  // The seat API reports the new fields for mount-time resolution.
+  const closest = contraption.getNearestSeat(contraption.getSeatWorldPosition('root', 0));
+  assert.equal(closest.componentId, 'root');
+  assert.equal(closest.fixedOrientation, true);
+  assert.ok(Array.isArray(closest.worldRotation));
+  assert.equal(closest.worldRotation.length, 4);
+});
+
+test('self.setSeats accepts both the position shorthand and oriented seat records', () => {
+  const contraption = new Contraption(
+    99,
+    [standardBlock(0)],
+    new THREE.Vector3(),
+    new THREE.Scene(),
+    { seats: [[0, 1, 0]] }
+  ) as any;
+  const api = contraption.getComponentApi('root');
+
+  // The legacy shorthand still yields a free-look identity seat.
+  assert.deepEqual(api.getSeats(), [{ position: [0, 1, 0], rotation: [0, 0, 0, 1], fixedOrientation: false }]);
+
+  api.setSeats([
+    { position: [0, 1, 2], rotation: [0, 0, 0, 1], fixedOrientation: true },
+    { position: [1, 0, 0], rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2] }
+  ]);
+  const seats = contraption.getComponentSeats('root');
+  assert.equal(seats.length, 2);
+  assert.equal(seats[0].fixedOrientation, true);
+  assert.deepEqual(seats[1].rotation, [0, Math.SQRT1_2, 0, Math.SQRT1_2]);
+  // Returned records are frozen snapshots, not live seat storage.
+  const snapshot = contraption.getComponentApi('root').getSeats();
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot[0]), true);
+  assert.equal(Object.isFrozen(snapshot[0].position), true);
 });
 test('ctx.players provides multiplayer-ready frozen id and position snapshots', () => {
   const contraption = new Contraption(

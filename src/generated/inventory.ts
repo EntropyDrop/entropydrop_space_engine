@@ -126,7 +126,22 @@ export interface BodyConfig {
 }
 
 export interface Seat {
-  position?: Vector3 | undefined;
+  position?:
+    | Vector3
+    | undefined;
+  /**
+   * Rider orientation in the owning component's pivot frame; identity means the
+   * rider faces the component's own forward axis (-Z). Absent is identical to
+   * identity and keeps every pre-orientation file byte-compatible.
+   */
+  rotation?:
+    | Quaternion
+    | undefined;
+  /**
+   * When true a mounted rider's yaw follows this seat's solved world orientation
+   * instead of free mouse look. Absent means false (free look).
+   */
+  fixedOrientation?: boolean | undefined;
 }
 
 /**
@@ -902,13 +917,19 @@ export const BodyConfig: MessageFns<BodyConfig> = {
 };
 
 function createBaseSeat(): Seat {
-  return { position: undefined };
+  return { position: undefined, rotation: undefined, fixedOrientation: undefined };
 }
 
 export const Seat: MessageFns<Seat> = {
   encode(message: Seat, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.position !== undefined) {
       Vector3.encode(message.position, writer.uint32(10).fork()).join();
+    }
+    if (message.rotation !== undefined) {
+      Quaternion.encode(message.rotation, writer.uint32(18).fork()).join();
+    }
+    if (message.fixedOrientation !== undefined) {
+      writer.uint32(24).bool(message.fixedOrientation);
     }
     return writer;
   },
@@ -934,6 +955,22 @@ export const Seat: MessageFns<Seat> = {
             message.position = Vector3.decode(reader, reader.uint32());
             continue;
           }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.rotation = Quaternion.decode(reader, reader.uint32());
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.fixedOrientation = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -954,6 +991,10 @@ export const Seat: MessageFns<Seat> = {
     message.position = (object.position !== undefined && object.position !== null)
       ? Vector3.fromPartial(object.position)
       : undefined;
+    message.rotation = (object.rotation !== undefined && object.rotation !== null)
+      ? Quaternion.fromPartial(object.rotation)
+      : undefined;
+    message.fixedOrientation = object.fixedOrientation ?? undefined;
     return message;
   },
 };

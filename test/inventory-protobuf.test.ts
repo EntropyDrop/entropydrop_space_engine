@@ -198,6 +198,50 @@ test('entity runtime adapters preserve arbitrary component ids without hierarchy
   );
 });
 
+test('seat orientation and fixed orientation survive the canonical protobuf round trip', () => {
+  const portable: any = {
+    type: 'space-entity',
+    version: 7,
+    root: {
+      name: 'Rover',
+      id: 'root',
+      body: { type: 'dynamic' },
+      blocks: [{ dx: 0, dy: 0, dz: 0, color: 1 }],
+      seats: [
+        // Identity orientation and free look are implicit and must not be encoded.
+        { position: [0, 1, 0] },
+        { position: [0, 1, 1], rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2], fixedOrientation: true },
+        { position: [1, 1, 0], rotation: [0, 0, 0, 1], fixedOrientation: true },
+      ],
+      children: [],
+    },
+    constraints: [],
+  };
+
+  const encoded = encodeInventoryResource('entity', portable);
+  const decoded = decodeInventoryResource(encoded).portable as any;
+  assert.deepEqual(decoded.root.seats, [
+    { position: [0, 1, 0] },
+    { position: [0, 1, 1], rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2], fixedOrientation: true },
+    // An explicit identity rotation canonicalizes away but the flag survives.
+    { position: [1, 1, 0], fixedOrientation: true },
+  ]);
+
+  // Re-encoding the decoded resource is byte-stable.
+  assert.deepEqual(
+    Buffer.from(encodeInventoryResource('entity', decoded)),
+    Buffer.from(encoded),
+  );
+
+  // The runtime adapter keeps the same optional fields for mount-time resolution.
+  const runtime = portableEntityToRuntime(decoded) as any;
+  assert.deepEqual(runtime.seats, [
+    { position: [0, 1, 0] },
+    { position: [0, 1, 1], rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2], fixedOrientation: true },
+    { position: [1, 1, 0], fixedOrientation: true },
+  ]);
+});
+
 test('runtime-to-portable projection drops legacy and unknown in-memory fields', () => {
   const portable = runtimeEntityToPortable({
     name: 'Projected',

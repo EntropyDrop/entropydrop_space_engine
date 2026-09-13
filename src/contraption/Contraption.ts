@@ -648,8 +648,12 @@ export class Contraption {
   lastBlocksChangedEvent: any;
   /** Rotation-center override for a kinematic root, set by setPivot; null uses center of mass. */
   rootPivotOverride: THREE.Vector3 | null;
-  /** Driver-seat positions relative to the root component pivot. */
-  seats: Array<{ position: [number, number, number] }>;
+  /** Driver seats relative to the root component pivot. */
+  seats: Array<{
+    position: [number, number, number];
+    rotation: [number, number, number, number];
+    fixedOrientation: boolean;
+  }>;
   scriptLogs: string[];
   lastExecutionTimeMs: number;
   tickCount: number;
@@ -966,15 +970,38 @@ export class Contraption {
     return scriptEditResult('removed', result.removed || 0, result.reason);
   }
 
+  /**
+   * Normalize the seat contract. The `[x,y,z]` shorthand stays valid and yields
+   * an identity rider orientation with free look, so every seat authored before
+   * orientations existed keeps its exact meaning. An explicitly supplied
+   * rotation must be a usable quaternion; a degenerate one rejects the seat
+   * instead of silently substituting identity.
+   */
   normalizeSeats(value) {
     if (!Array.isArray(value)) return [];
     return value.flatMap(seat => {
       const position = Array.isArray(seat) ? seat : seat?.position;
       if (!Array.isArray(position) || position.length < 3) return [];
       const normalized = position.slice(0, 3).map(Number);
-      return normalized.every(Number.isFinite)
-        ? [{ position: normalized as [number, number, number] }]
-        : [];
+      if (!normalized.every(Number.isFinite)) return [];
+      const requestedRotation = seat?.rotation;
+      let rotation: [number, number, number, number] = [0, 0, 0, 1];
+      if (requestedRotation !== undefined && requestedRotation !== null) {
+        const components = Array.isArray(requestedRotation)
+          ? requestedRotation.slice(0, 4).map(Number)
+          : [requestedRotation.x, requestedRotation.y, requestedRotation.z, requestedRotation.w].map(Number);
+        if (components.length < 4 || !components.every(Number.isFinite)) return [];
+        const quaternion = new THREE.Quaternion(
+          components[0], components[1], components[2], components[3]
+        );
+        if (quaternion.lengthSq() <= 1e-12) return [];
+        rotation = quaternion.normalize().toArray() as [number, number, number, number];
+      }
+      return [{
+        position: normalized as [number, number, number],
+        rotation,
+        fixedOrientation: (Array.isArray(seat) ? false : seat?.fixedOrientation) === true
+      }];
     });
   }
 
@@ -1075,6 +1102,20 @@ export class Contraption {
     ));
   }
 
+  /**
+   * Resolve one seat's rider orientation through the current articulated pose.
+   * The seat rotation is authored in the owning component's pivot frame, so the
+   * result follows every ancestor rotation as the body swings.
+   */
+  getSeatWorldQuaternion(componentId = this.rootComponentId, seatIndex = 0) {
+    const id = String(componentId || this.rootComponentId);
+    const node = this.entityNodes.get(id);
+    const seat = this.getComponentSeats(id)[Number(seatIndex)];
+    if (!node || !seat) return null;
+    const seatRotation = new THREE.Quaternion().fromArray(seat.rotation);
+    return this.getEntityNodeWorldQuaternion(id).multiply(seatRotation).normalize();
+  }
+
   /** Find the seat whose current world position is closest to the aimed block. */
   getNearestSeat(worldFocus) {
     if (!worldFocus?.isVector3) return null;
@@ -1088,7 +1129,14 @@ export class Contraption {
         if (!worldPosition) continue;
         const distanceSq = worldPosition.distanceToSquared(worldFocus);
         if (!nearest || distanceSq < nearest.distanceSq) {
-          nearest = { componentId: node.id, seatIndex: index, worldPosition, distanceSq };
+          nearest = {
+            componentId: node.id,
+            seatIndex: index,
+            worldPosition,
+            worldRotation: this.getSeatWorldQuaternion(node.id, index).toArray(),
+            fixedOrientation: seats[index].fixedOrientation,
+            distanceSq
+          };
         }
       }
     }
@@ -1289,15 +1337,19 @@ export class Contraption {
         // World-space torque is identical for every component.
         this.applyTorque(torque);
       },
-      /** Replace this component's driver-seat positions, relative to its pivot. */
+      /** Replace this component's driver seats, relative to its pivot. */
       setSeats: values => this.setComponentSeats(id, values),
       /** Stop every script and reset runtime state. Root-only; children are a no-op. */
       stop: isRoot ? () => {
         this.performBasicAction({ action: 'stop-scripts' });
         return true;
       } : noop,
-      /** Read this component's seat positions relative to its pivot. */
-      getSeats: () => Object.freeze(this.getComponentSeats(id).map(seat => Object.freeze([...seat.position]))),
+      /** Read this component's driver seats relative to its pivot. */
+      getSeats: () => Object.freeze(this.getComponentSeats(id).map(seat => Object.freeze({
+        position: Object.freeze([...seat.position]),
+        rotation: Object.freeze([...seat.rotation]),
+        fixedOrientation: seat.fixedOrientation
+      }))),
       /**
        * Find a direct child from any component, with chaining such as
        * ctx.root.child('arm').child('hand').
@@ -4991,7 +5043,11 @@ export class Contraption {
           localPosition: node.parentId === null ? [0, 0, 0] : node.localPosition.toArray(),
           localRotation: node.parentId === null ? this.quaternion.toArray() : node.localQuaternion.toArray(),
           pivot: node.pivotLocal.toArray(),
-          seats: this.getComponentSeats(node.id).map(seat => [...seat.position]),
+          seats: this.getComponentSeats(node.id).map(seat => ({
+            position: [...seat.position],
+            rotation: [...seat.rotation],
+            fixedOrientation: seat.fixedOrientation
+          })),
           bounds: this.getNodeBlocksBounds(node.id),
           constraints: this.getConstraints(node.id),
           body: {

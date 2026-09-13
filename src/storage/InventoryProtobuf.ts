@@ -281,6 +281,32 @@ function quaternionArray(value: Quaternion | undefined): number[] | undefined {
     : undefined;
 }
 
+/** Identity rider orientation is the implicit default and is never serialized. */
+function isIdentityQuaternionArray(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length < 4) return true;
+  return value[0] === 0 && value[1] === 0 && value[2] === 0 && value[3] === 1;
+}
+
+function isIdentityQuaternion(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return isIdentityQuaternionArray(value);
+  const quaternion = value as { x?: unknown; y?: unknown; z?: unknown; w?: unknown };
+  return isIdentityQuaternionArray([quaternion.x, quaternion.y, quaternion.z, quaternion.w]);
+}
+
+/** Canonical portable seat: identity orientation and free look stay implicit. */
+function portableSeat(seat: any): any {
+  const rotation = seat?.rotation;
+  return {
+    position: seat.position.map(canonicalDouble),
+    ...(rotation === undefined || isIdentityQuaternion(rotation)
+      ? {}
+      : { rotation: (Array.isArray(rotation) ? rotation : [rotation.x, rotation.y, rotation.z, rotation.w])
+        .map(canonicalDouble) }),
+    ...(seat?.fixedOrientation === true ? { fixedOrientation: true } : {}),
+  };
+}
+
 /** Validate one cell-local micro offset against the shared 8-division grid. */
 function microOffset(value: unknown, axis: 'x' | 'y' | 'z'): number {
   const offset = Number(value);
@@ -394,7 +420,13 @@ function componentMessage(component: any, includeNames = true): Component {
     blocks: canonicalVoxelMessages(component?.blocks || []),
     script: component?.script === undefined ? undefined : String(component.script),
     scriptDisabled: component?.scriptDisabled === true,
-    seats: (component?.seats || []).map((seat: any) => ({ position: vector3(seat.position) })),
+    seats: (component?.seats || []).map((seat: any) => ({
+      position: vector3(seat.position),
+      // Identity is the pre-orientation default, so omitting it keeps every
+      // existing seat byte-identical after a decode/re-encode round trip.
+      ...(isIdentityQuaternion(seat.rotation) ? {} : { rotation: quaternion(seat.rotation) }),
+      ...(seat.fixedOrientation === true ? { fixedOrientation: true } : {}),
+    })),
     children: [...(component?.children || [])]
       .sort((left: any, right: any) => compareCodePoints(left?.id || '', right?.id || ''))
       .map((child: any) => componentMessage(child, includeNames)),
@@ -411,7 +443,19 @@ function portableComponent(component: Component): any {
     if (!position) {
       throw new Error(`Component ${String(component.id || '')} contains a seat without a position.`);
     }
-    return { position };
+    const rotation = quaternionArray(seat.rotation);
+    // A present-but-degenerate rotation would silently collapse to identity, so
+    // reject it the same way a missing position is rejected.
+    const rawRotation = seat.rotation;
+    if (rawRotation !== undefined && rotation !== undefined
+      && rawRotation.x === 0 && rawRotation.y === 0 && rawRotation.z === 0 && rawRotation.w === 0) {
+      throw new Error(`Component ${String(component.id || '')} contains a seat with a degenerate rotation.`);
+    }
+    return {
+      position,
+      ...(rotation === undefined || isIdentityQuaternionArray(rotation) ? {} : { rotation }),
+      ...(seat.fixedOrientation === true ? { fixedOrientation: true } : {}),
+    };
   });
   return {
     id: String(component.id || ''),
@@ -611,9 +655,17 @@ export function runtimeEntityToPortable(runtime: any): any {
     blocks: [],
     ...(scripts.has(id) ? { script: scripts.get(id) } : {}),
     ...(scripts.has(id) && enabled.get(id) === false ? { scriptDisabled: true } : {}),
-    seats: (source?.seats || []).map((seat: any) => ({
-      position: (Array.isArray(seat) ? seat : seat.position).map(canonicalDouble),
-    })),
+    seats: (source?.seats || []).map((seat: any) => {
+      const rotation = Array.isArray(seat) ? undefined : seat.rotation;
+      return {
+        position: (Array.isArray(seat) ? seat : seat.position).map(canonicalDouble),
+        ...(rotation === undefined || isIdentityQuaternion(rotation)
+          ? {}
+          : { rotation: (Array.isArray(rotation) ? rotation : [rotation.x, rotation.y, rotation.z, rotation.w])
+            .map(canonicalDouble) }),
+        ...(Array.isArray(seat) || seat.fixedOrientation !== true ? {} : { fixedOrientation: true }),
+      };
+    }),
     children: [],
   });
   const rootComponentId = String(runtime?.rootComponentId ?? '');
@@ -699,9 +751,7 @@ export function portableEntityToRuntime(portable: any): any {
         ...(body.friction === undefined ? {} : { friction: canonicalDouble(body.friction) }),
         ...(body.useGravity === undefined ? {} : { useGravity: body.useGravity === true }),
         ...(body.collisionEnabled === undefined ? {} : { collisionEnabled: body.collisionEnabled === true }),
-        seats: (component.seats || []).map((seat: any) => ({
-          position: seat.position.map(canonicalDouble),
-        })),
+        seats: (component.seats || []).map((seat: any) => portableSeat(seat)),
       });
     }
     for (const child of [...(component.children || [])]
@@ -739,9 +789,7 @@ export function portableEntityToRuntime(portable: any): any {
     ...(rootBody.friction === undefined ? {} : { friction: canonicalDouble(rootBody.friction) }),
     ...(rootBody.useGravity === undefined ? {} : { useGravity: rootBody.useGravity === true }),
     ...(rootBody.collisionEnabled === undefined ? {} : { collisionEnabled: rootBody.collisionEnabled === true }),
-    seats: (portable.root?.seats || []).map((seat: any) => ({
-      position: seat.position.map(canonicalDouble),
-    })),
+    seats: (portable.root?.seats || []).map((seat: any) => portableSeat(seat)),
   };
 }
 
