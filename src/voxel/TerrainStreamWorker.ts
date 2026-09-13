@@ -67,7 +67,7 @@ function makeWorkerWorld(terrainGen: TerrainGenerator) {
     getChunk() {
       return null;
     },
-    markChunkDirty() {},
+    markChunkDirty() { },
   };
 }
 
@@ -139,4 +139,4 @@ workerScope.onmessage = (event: MessageEvent<TerrainWorkerRequest>) => {
   }
 };
 
-export {};
+export { };

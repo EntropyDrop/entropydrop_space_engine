@@ -1317,7 +1317,7 @@ export class World {
           ? this.pendingRemoteChunkApply.revision
           : -1;
         const snapshotIsCurrent = (this.remoteChunkRevisions.get(nextJob.key) ?? -1)
-            === nextJob.snapshot.revision
+          === nextJob.snapshot.revision
           && queuedRevision <= nextJob.snapshot.revision
           && applyingRevision <= nextJob.snapshot.revision;
         const replacementIsCurrent = nextJob.replacingChunk
